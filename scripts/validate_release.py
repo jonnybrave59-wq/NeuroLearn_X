@@ -166,6 +166,8 @@ def validate_source_archive(source_archive: Path) -> None:
         f"{prefix}render.yaml",
         f"{prefix}.replit",
         f"{prefix}README.md",
+        f"{prefix}Start-NeuroLearn-X.bat",
+        f"{prefix}Start-NeuroLearn-X.ps1",
         f"{prefix}DEPLOYMENT.md",
         f"{prefix}ANDROID_BUILD.md",
         f"{prefix}WINDOWS_LAUNCHER_BUILD.md",

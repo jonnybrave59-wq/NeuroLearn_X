@@ -144,6 +144,8 @@ def validate(paths: list[Path]):
         "render.yaml",
         ".replit",
         "README.md",
+        "Start-NeuroLearn-X.bat",
+        "Start-NeuroLearn-X.ps1",
         "DEPLOYMENT.md",
         "ANDROID_BUILD.md",
         "WINDOWS_LAUNCHER_BUILD.md",

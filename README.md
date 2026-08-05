@@ -152,6 +152,11 @@ All seeded users have `must_change_password=true`. Change every default password
 
 ## Local setup
 
+For the existing built application, double-click `Start-NeuroLearn-X.bat` in
+the project root. Do not open `frontend/dist/index.html` directly: NeuroLearn-X
+is a full-stack system and the compiled interface requires FastAPI `/api`
+routes, authentication, and the database.
+
 ### 1. Create the Python environment
 
 From the project root on Windows PowerShell:
