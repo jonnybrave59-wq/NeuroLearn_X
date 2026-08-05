@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">NeuroLearn-X</string>
+    <string name="title_activity_main">NeuroLearn-X</string>
+    <string name="package_name">com.hnchs.neurolearnx</string>
+    <string name="custom_url_scheme">com.hnchs.neurolearnx</string>
+</resources>

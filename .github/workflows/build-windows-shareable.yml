@@ -1,0 +1,127 @@
+name: Build NeuroLearn-X Windows Shareable Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      production_url:
+        description: "Permanent NeuroLearn-X HTTPS deployment URL"
+        required: true
+        type: string
+      researcher_contact:
+        description: "Researcher name, email, or official contact line"
+        required: true
+        type: string
+      version:
+        description: "Application version"
+        required: true
+        default: "1.1.0"
+        type: string
+      release_date:
+        description: "Human-readable release date"
+        required: true
+        default: "August 2, 2026"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-shareable:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install guide and validation dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check reportlab "qrcode[pil]" pypdf
+
+      - name: Generate launcher icon
+        shell: pwsh
+        run: python scripts/generate_launcher_assets.py
+
+      - name: Publish portable Windows launcher
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ inputs.version }}
+        run: >
+          dotnet publish launcher/NeuroLearnX.Launcher/NeuroLearnX.Launcher.csproj
+          -c Release
+          -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=None
+          -p:Version="$env:APP_VERSION"
+          -o launcher/build/win-x64
+
+      - name: Build shareable ZIP
+        shell: pwsh
+        env:
+          PRODUCTION_URL: ${{ inputs.production_url }}
+          APP_VERSION: ${{ inputs.version }}
+          RELEASE_DATE: ${{ inputs.release_date }}
+          RESEARCHER_CONTACT: ${{ inputs.researcher_contact }}
+        run: >
+          python scripts/build_shareable_package.py
+          --production-url "$env:PRODUCTION_URL"
+          --exe "launcher/build/win-x64/Open NeuroLearn-X.exe"
+          --version "$env:APP_VERSION"
+          --release-date "$env:RELEASE_DATE"
+          --contact "$env:RESEARCHER_CONTACT"
+
+      - name: Verify launcher configuration and executable startup
+        shell: pwsh
+        run: |
+          & "launcher/build/shareable/NeuroLearn-X/Open NeuroLearn-X.exe" --self-test
+          if ($LASTEXITCODE -ne 0) {
+            throw "The Windows launcher self-test failed."
+          }
+
+      - name: Verify public application
+        shell: pwsh
+        env:
+          PRODUCTION_URL: ${{ inputs.production_url }}
+        run: |
+          $url = ($env:PRODUCTION_URL).TrimEnd("/")
+          $ready = Invoke-WebRequest -UseBasicParsing -Uri "$url/api/health/ready" -TimeoutSec 20
+          $home = Invoke-WebRequest -UseBasicParsing -Uri "$url/" -TimeoutSec 20
+          if ($ready.StatusCode -ne 200 -or $home.StatusCode -ne 200) {
+            throw "The public NeuroLearn-X application did not pass health checks."
+          }
+          if ($home.Content -notmatch "NeuroLearn-X") {
+            throw "The public URL does not appear to serve NeuroLearn-X."
+          }
+
+      - name: Validate ZIP, privacy scan, and checksums
+        shell: pwsh
+        run: python scripts/validate_shareable.py release/NeuroLearn-X-Shareable.zip
+
+      - name: Upload shareable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeuroLearn-X-Shareable
+          path: release/NeuroLearn-X-Shareable.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload portable launcher
+        uses: actions/upload-artifact@v4
+        with:
+          name: Open-NeuroLearn-X-Windows
+          path: |
+            launcher/build/shareable/NeuroLearn-X/Open NeuroLearn-X.exe
+            launcher/build/shareable/NeuroLearn-X/launcher-config.json
+          if-no-files-found: error
+          retention-days: 30

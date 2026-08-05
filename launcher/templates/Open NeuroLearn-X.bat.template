@@ -1,0 +1,16 @@
+@echo off
+setlocal
+set "NEUROLEARNX_URL={{PUBLIC_URL}}"
+
+echo %NEUROLEARNX_URL% | findstr /b /i /c:"https://" >nul
+if errorlevel 1 (
+  echo.
+  echo NeuroLearn-X has not been connected to its public HTTPS address yet.
+  echo Please contact the official researchers for an updated package.
+  echo.
+  pause
+  exit /b 1
+)
+
+start "" "%NEUROLEARNX_URL%"
+exit /b 0

@@ -1,0 +1,115 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    font-family:
+      Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      sans-serif;
+    color: #1e293b;
+    background: #f3f7fa;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    margin: 0;
+    min-width: 320px;
+    min-height: 100vh;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  ::selection {
+    background: #39d0dc;
+    color: #071b34;
+  }
+
+  :focus-visible {
+    outline: 3px solid rgba(11, 183, 201, 0.65);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-cyanx-500 px-4 py-2.5 text-sm font-black text-navy-950 shadow-sm transition hover:bg-cyanx-400 focus-visible:outline-cyanx-600 disabled:hover:bg-cyanx-500;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50;
+  }
+
+  .icon-button {
+    @apply grid h-9 w-9 place-items-center rounded-lg bg-slate-100 text-slate-600 transition hover:bg-slate-200 hover:text-navy-950;
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-cyanx-500 focus:ring-4 focus:ring-cyan-100;
+  }
+
+  .field {
+    @apply block;
+  }
+
+  .field > span {
+    @apply mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-600;
+  }
+
+  .field input,
+  .field select,
+  .field textarea {
+    @apply input;
+  }
+
+  .field textarea {
+    @apply min-h-24 resize-y;
+  }
+
+  .field small {
+    @apply mt-1.5 block text-xs text-slate-500;
+  }
+
+  .data-table {
+    @apply w-full min-w-[680px] border-collapse text-left text-sm;
+  }
+
+  .data-table th {
+    @apply border-b border-slate-100 bg-slate-50 px-5 py-3 text-[11px] font-black uppercase tracking-wider text-slate-500;
+  }
+
+  .data-table td {
+    @apply border-b border-slate-100 px-5 py-4 align-middle text-slate-600;
+  }
+
+  .data-table tbody tr {
+    @apply transition hover:bg-slate-50/80;
+  }
+
+  .data-table tbody tr:last-child td {
+    @apply border-b-0;
+  }
+}
+
+.react-flow__attribution {
+  display: none;
+}

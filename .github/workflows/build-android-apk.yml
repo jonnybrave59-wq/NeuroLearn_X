@@ -1,0 +1,137 @@
+name: Build NeuroLearn-X Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-debug-apk:
+    runs-on: ubuntu-latest
+    env:
+      VITE_PUBLIC_APP_URL: ${{ vars.NEUROLEARNX_PUBLIC_URL }}
+      VITE_API_BASE_URL: ${{ vars.NEUROLEARNX_PUBLIC_URL }}
+      VITE_APK_AVAILABLE: "false"
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Require the deployed HTTPS backend
+        shell: bash
+        run: |
+          if [[ ! "$VITE_API_BASE_URL" =~ ^https:// ]]; then
+            echo "Set the repository variable NEUROLEARNX_PUBLIC_URL to the deployed HTTPS app URL."
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install web dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Test and build web app
+        working-directory: frontend
+        run: |
+          npm test
+          npm run build
+
+      - name: Sync Capacitor Android project
+        working-directory: frontend
+        run: |
+          node scripts/validate-android-env.mjs
+          npx cap sync android
+
+      - name: Test, lint, and build debug APK
+        working-directory: frontend/android
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest lintDebug assembleDebug
+
+      - name: Verify APK identity and signature
+        shell: bash
+        run: |
+          APK="frontend/android/app/build/outputs/apk/debug/app-debug.apk"
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          test -f "$APK"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$APK"
+          "$BUILD_TOOLS/aapt" dump badging "$APK" | grep "package: name='com.hnchs.neurolearnx'"
+          "$BUILD_TOOLS/aapt" dump permissions "$APK" | grep "android.permission.INTERNET"
+
+      - name: Name and checksum APK
+        shell: bash
+        run: |
+          mkdir -p release
+          cp frontend/android/app/build/outputs/apk/debug/app-debug.apk release/NeuroLearn-X.apk
+          sha256sum release/NeuroLearn-X.apk > release/NeuroLearn-X.apk.sha256
+
+      - name: Validate optional release signing secrets
+        shell: bash
+        run: |
+          present=0
+          for value in "$ANDROID_KEYSTORE_BASE64" "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD"; do
+            [[ -n "$value" ]] && present=$((present + 1))
+          done
+          if [[ "$present" -ne 0 && "$present" -ne 4 ]]; then
+            echo "Configure all four Android release-signing secrets or leave all four unset."
+            exit 1
+          fi
+          if [[ "$present" -eq 4 ]]; then
+            keystore="$RUNNER_TEMP/neurolearnx-release.jks"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+            echo "ANDROID_KEYSTORE_PATH=$keystore" >> "$GITHUB_ENV"
+            echo "BUILD_SIGNED_RELEASE=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build and verify signed release APK
+        if: env.BUILD_SIGNED_RELEASE == '1'
+        working-directory: frontend/android
+        shell: bash
+        run: |
+          ./gradlew assembleRelease
+          APK="app/build/outputs/apk/release/app-release.apk"
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          test -f "$APK"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$APK"
+          cp "$APK" ../../release/NeuroLearn-X-release.apk
+          sha256sum ../../release/NeuroLearn-X-release.apk > ../../release/NeuroLearn-X-release.apk.sha256
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeuroLearn-X-Android-debug
+          path: |
+            release/NeuroLearn-X.apk
+            release/NeuroLearn-X.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload signed release APK
+        if: env.BUILD_SIGNED_RELEASE == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeuroLearn-X-Android-release
+          path: |
+            release/NeuroLearn-X-release.apk
+            release/NeuroLearn-X-release.apk.sha256
+          if-no-files-found: error
+          retention-days: 30

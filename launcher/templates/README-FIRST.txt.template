@@ -1,0 +1,37 @@
+HOW TO OPEN NEUROLEARN-X
+
+1. Right-click NeuroLearn-X-Shareable.zip.
+2. Select Extract All.
+3. Open the extracted folder.
+4. Double-click Open NeuroLearn-X.exe.
+5. If Windows displays a warning, verify that the file came from the official researchers before continuing.
+6. Log in using your assigned Student or Teacher account.
+
+An internet connection is required because NeuroLearn-X uses a secure online database and recommendation server.
+
+PUBLIC WEB LINK
+{{PUBLIC_URL}}
+
+QR CODE
+Open QR-Code.png or scan the QR code printed in NeuroLearn-X-Quick-Guide.pdf.
+
+SUPPORTED DEVICES
+- Windows 10 or Windows 11: Open NeuroLearn-X.exe, Chrome, or Edge
+- Android phones and tablets: Chrome or the installed NeuroLearn-X PWA
+- iPhone and iPad: Safari, then Share > Add to Home Screen
+- macOS, Linux, and ChromeOS: current Chrome, Edge, Firefox, or Safari
+
+LOGIN
+Use only the participant code and password assigned by the authorized research team.
+Do not share credentials or save them on a shared computer.
+
+PRIVACY
+Shared links contain only the public NeuroLearn-X address. Sign out after use,
+especially on a shared device. Do not copy participant records outside the
+approved research workflow.
+
+VERSION
+{{VERSION}} - Released {{RELEASE_DATE}}
+
+RESEARCHER CONTACT
+{{CONTACT}}

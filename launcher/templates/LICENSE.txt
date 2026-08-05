@@ -1,0 +1,20 @@
+NEUROLEARN-X RESEARCH PROTOTYPE - LICENSE AND USE NOTICE
+
+Copyright (c) 2026 NeuroLearn-X Research Team.
+All rights reserved.
+
+Permission is granted to the official researchers, educators, evaluators, and
+authorized participants to use this package for approved educational research,
+demonstration, evaluation, and classroom testing.
+
+This package may not be used to collect real participant data outside an
+approved research protocol. Demo predictions and seeded metrics are
+demonstration data, not research findings and not medical or psychological
+diagnoses.
+
+The software is provided as a research prototype without warranty. The research
+team remains responsible for informed consent, account management, data
+retention, backups, and compliance with applicable school and research policy.
+
+Replace the researcher contact placeholder in the Quick Guide before public
+distribution.

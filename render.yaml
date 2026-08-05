@@ -1,0 +1,41 @@
+databases:
+  - name: neurolearn-x-postgres
+    plan: free
+    region: singapore
+    databaseName: neurolearnx
+    user: neurolearnx
+    postgresMajorVersion: "18"
+
+services:
+  - type: web
+    name: neurolearn-x
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health/ready
+    autoDeployTrigger: commit
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: neurolearn-x-postgres
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: COOKIE_SAMESITE
+        value: none
+      - key: CAPACITOR_ORIGINS
+        value: https://localhost
+      - key: CREATE_TABLES_ON_STARTUP
+        value: "0"
+      - key: SEED_DEMO_ON_STARTUP
+        value: "0"
+      - key: SEED_DEMO_IF_EMPTY
+        value: "1"
+      - key: LOG_LEVEL
+        value: INFO
