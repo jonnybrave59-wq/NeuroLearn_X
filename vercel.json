@@ -1,20 +1,43 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "experimentalServices": {
+  "services": {
     "frontend": {
-      "entrypoint": "frontend",
-      "routePrefix": "/"
+      "root": "frontend",
+      "framework": "vite",
+      "buildCommand": "npm run build",
+      "outputDirectory": "dist"
     },
     "backend": {
-      "entrypoint": "backend/vercel.py",
-      "routePrefix": "/api",
-      "memory": 2048,
-      "maxDuration": 300,
-      "includeFiles": [
-        "backend/app/**",
-        "backend/alembic/**",
-        "backend/alembic.ini"
-      ]
+      "root": "backend",
+      "framework": "fastapi",
+      "entrypoint": "vercel:app",
+      "functions": {
+        "vercel.py": {
+          "memory": 2048,
+          "maxDuration": 300,
+          "includeFiles": "{app/**,alembic/**,alembic.ini}"
+        }
+      }
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/api",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "frontend"
+      }
+    }
+  ]
 }
