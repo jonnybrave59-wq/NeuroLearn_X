@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 RELEASE = ROOT / "release"
 SOURCE_ARCHIVE = RELEASE / f"NeuroLearn-X-Source-v{VERSION}.zip"
 SOURCE_CODE_ARCHIVE = RELEASE / "NeuroLearn-X-Source-Code.zip"
@@ -67,7 +67,7 @@ def validate_pwa() -> None:
         if required_asset not in service_worker:
             raise RuntimeError(f"Service worker does not precache {required_asset}")
     for required_rule in (
-        "neurolearnx-v1.3.0",
+        "neurolearnx-v1.3.1",
         "skipWaiting()",
         "clientsClaim()",
         "NetworkOnly",
@@ -131,11 +131,15 @@ def validate_source_archive(source_archive: Path) -> None:
         f"{prefix}backend/app/seed.py",
         f"{prefix}backend/app/seed_if_empty.py",
         f"{prefix}backend/app/tutoring.py",
+        f"{prefix}backend/app/production_accounts.py",
         f"{prefix}backend/alembic/versions/0001_initial.py",
         f"{prefix}backend/alembic/versions/0002_accounts_authoring.py",
         f"{prefix}backend/alembic/versions/0003_adaptive_learning.py",
         f"{prefix}backend/alembic/versions/0004_intelligent_tutoring.py",
         f"{prefix}backend/alembic/versions/0005_model_artifact.py",
+        f"{prefix}backend/alembic/versions/0006_teacher_refinement_evidence.py",
+        f"{prefix}backend/alembic/versions/0007_learner_onboarding.py",
+        f"{prefix}backend/alembic/versions/0008_production_hardening.py",
         f"{prefix}backend/tests/test_api.py",
         f"{prefix}backend/tests/test_extended_features.py",
         f"{prefix}backend/tests/test_revision_features.py",
@@ -144,6 +148,7 @@ def validate_source_archive(source_archive: Path) -> None:
         f"{prefix}frontend/src/timer.test.ts",
         f"{prefix}scripts/package_full_system.py",
         f"{prefix}scripts/migrate_sqlite_to_postgres.py",
+        f"{prefix}scripts/smoke_test_deployment.py",
         f"{prefix}scripts/validate_full_system.py",
         f"{prefix}full-system/README-FIRST.md",
         f"{prefix}full-system/FULL-SYSTEM-SETUP.md",
@@ -160,6 +165,7 @@ def validate_source_archive(source_archive: Path) -> None:
         f"{prefix}scripts/validate_shareable.py",
         f"{prefix}.github/workflows/build-windows-shareable.yml",
         f"{prefix}.github/workflows/build-android-apk.yml",
+        f"{prefix}.github/workflows/production-ci.yml",
         f"{prefix}.env.example",
         f"{prefix}.dockerignore",
         f"{prefix}Dockerfile",
@@ -239,7 +245,11 @@ def validate_release_directory() -> None:
             raise RuntimeError("Full-system ZIP checksum does not match")
         allowed.update({full_system.name, full_system_checksum.name})
 
-    unexpected = sorted(path.name for path in RELEASE.iterdir() if path.name not in allowed)
+    unexpected = sorted(
+        path.name
+        for path in RELEASE.iterdir()
+        if path.is_file() and path.name not in allowed
+    )
     if unexpected:
         raise RuntimeError(f"Unexpected public release files: {unexpected}")
 

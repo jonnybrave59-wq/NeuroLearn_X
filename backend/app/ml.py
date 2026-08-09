@@ -16,12 +16,15 @@ from .models import (
     Activity,
     ActivityConcept,
     AssessmentAttempt,
+    Concept,
+    CognitiveLoadPrediction,
     InteractionLog,
     MasteryRecord,
     MentalEffortRating,
     ModelVersion,
     PrerequisiteEdge,
     Question,
+    User,
 )
 
 
@@ -232,12 +235,16 @@ def predict_activity_load(
     )
     if not version:
         return rule_based_prediction(features)
-    if version.artifact:
-        bundle = joblib.load(io.BytesIO(version.artifact))
-    elif version.file_path and Path(version.file_path).exists():
-        bundle = joblib.load(version.file_path)
-    else:
-        return rule_based_prediction(features)
+    bundle_cache = db.info.setdefault("neurolearnx_model_bundles", {})
+    bundle = bundle_cache.get(version.id)
+    if bundle is None:
+        if version.artifact:
+            bundle = joblib.load(io.BytesIO(version.artifact))
+        elif version.file_path and Path(version.file_path).exists():
+            bundle = joblib.load(version.file_path)
+        else:
+            return rule_based_prediction(features)
+        bundle_cache[version.id] = bundle
     values = np.array([[features[name] for name in FEATURE_NAMES]], dtype=float)
     scaled = bundle["scaler"].transform(values)
     probabilities_array, classes = _soft_probabilities(bundle["models"], scaled)
@@ -246,6 +253,16 @@ def predict_activity_load(
         {str(label): float(value) for label, value in zip(classes, probabilities_array[0])}
     )
     category = max(probabilities, key=probabilities.get)
+    model_probabilities = []
+    for model in bundle["models"]:
+        model_values = model.predict_proba(scaled)[0]
+        lookup = {
+            str(label): float(value)
+            for label, value in zip(model.classes_, model_values)
+        }
+        model_probabilities.append(
+            {label: lookup.get(label, 0.0) for label in CLASS_ORDER}
+        )
     important: dict[str, float] = {}
     explanation_method = f"Approximate ensemble importance for {category}"
     if explain:
@@ -299,6 +316,184 @@ def predict_activity_load(
         "explanation": important,
         "source": f"Ensemble model {version.version} · {explanation_method}",
         "warning": version.warning,
+        "model_version": version.version,
+        "model_count": len(bundle["models"]),
+        "model_probabilities": model_probabilities,
+        "features": features,
+        "normalized_features": {
+            name: float(value)
+            for name, value in zip(FEATURE_NAMES, scaled[0])
+        },
+        "normalization_ranges": {
+            name: {
+                "minimum": float(minimum),
+                "maximum": float(maximum),
+            }
+            for name, minimum, maximum in zip(
+                FEATURE_NAMES,
+                bundle["scaler"].data_min_,
+                bundle["scaler"].data_max_,
+            )
+        },
+    }
+
+
+def predict_student_cognitive_load(db: Session, student_id: int) -> dict[str, Any]:
+    student = db.get(User, student_id)
+    if (
+        not student
+        or student.role != "student"
+        or not student.is_active
+        or student.account_status != "Active"
+    ):
+        raise ValueError("Active learner not found")
+    latest = db.scalar(
+        select(InteractionLog)
+        .where(InteractionLog.student_id == student_id)
+        .order_by(InteractionLog.submission_time.desc())
+    )
+    if not latest:
+        return {
+            "available": False,
+            "message": "Insufficient data for a learner-specific prediction",
+            "student_id": student.id,
+            "participant_code": student.participant_code,
+        }
+    activity = db.get(Activity, latest.activity_id)
+    concept = db.get(Concept, latest.concept_id)
+    attempt = db.get(AssessmentAttempt, latest.attempt_id)
+    rating = db.scalar(
+        select(MentalEffortRating)
+        .where(MentalEffortRating.student_id == student.id)
+        .order_by(MentalEffortRating.created_at.desc())
+    )
+    if not activity or not concept or not attempt:
+        return {
+            "available": False,
+            "message": "Insufficient data for a learner-specific prediction",
+            "student_id": student.id,
+            "participant_code": student.participant_code,
+        }
+    result = predict_activity_load(
+        db,
+        student.id,
+        activity,
+        concept.id,
+        concept.difficulty,
+        explain=False,
+    )
+    if not result.get("model_version"):
+        return {
+            "available": False,
+            "message": "Insufficient data for reliable model prediction",
+            "student_id": student.id,
+            "participant_code": student.participant_code,
+            "evidence": {
+                "assessment_score": attempt.score,
+                "maximum_score": attempt.max_score,
+                "accuracy": attempt.accuracy,
+                "average_response_seconds": latest.average_response_seconds,
+                "completion_seconds": attempt.total_seconds,
+                "attempts": latest.number_of_attempts,
+                "skipped_questions": attempt.skipped_items,
+                "hint_usage": attempt.hint_usage_count,
+                "mental_effort_rating": rating.rating if rating else None,
+            },
+        }
+    probabilities = result["probabilities"]
+    confidence_value = max(probabilities.values())
+    confidence = "High" if confidence_value >= 0.80 else "Moderate" if confidence_value >= 0.60 else "Low"
+    normalization = {}
+    for name, raw_value in result["features"].items():
+        bounds = result["normalization_ranges"][name]
+        normalization[name] = {
+            "raw": raw_value,
+            "minimum": bounds["minimum"],
+            "maximum": bounds["maximum"],
+            "normalized": result["normalized_features"][name],
+            "formula": (
+                f"({raw_value:.4g} - {bounds['minimum']:.4g}) / "
+                f"({bounds['maximum']:.4g} - {bounds['minimum']:.4g})"
+            ),
+        }
+    probability_formula = {}
+    for label in CLASS_ORDER:
+        values = [item[label] for item in result["model_probabilities"]]
+        probability_formula[label] = (
+            f"({' + '.join(f'{value:.4f}' for value in values)}) / "
+            f"{result['model_count']} = {probabilities[label]:.4f}"
+        )
+    recommended_action = {
+        "Low": "Offer an optional challenge or faster review while continuing to monitor mastery.",
+        "Moderate": "Continue standard instruction with guided support and timely feedback.",
+        "High": "Reduce task complexity, add scaffolds, and break the next activity into shorter steps.",
+    }[result["category"]]
+    evidence_payload = {
+        "activity": activity.title,
+        "concept": concept.name,
+        "assessment_score": attempt.score,
+        "maximum_score": attempt.max_score,
+        "accuracy": attempt.accuracy,
+        "average_response_seconds": latest.average_response_seconds,
+        "completion_seconds": attempt.total_seconds,
+        "attempts": latest.number_of_attempts,
+        "skipped_questions": attempt.skipped_items,
+        "hint_usage": attempt.hint_usage_count,
+        "mental_effort_rating": rating.rating if rating else None,
+        "recent_mastery": result["features"].get("current_mastery"),
+        "evidence_date": latest.submission_time.isoformat() if latest.submission_time else None,
+    }
+    missing_features = [key for key, value in evidence_payload.items() if value is None]
+    version = db.scalar(select(ModelVersion).where(ModelVersion.version == result["model_version"]))
+    prediction = CognitiveLoadPrediction(
+        student_id=student.id,
+        model_version_id=version.id,
+        evidence_date=latest.submission_time,
+        probabilities=probabilities,
+        predicted_category=result["category"],
+        expected_index=result["index"],
+        confidence=confidence_value,
+        evidence=evidence_payload,
+        missing_features=missing_features,
+        feature_contributions=result["explanation"],
+        recommended_action=recommended_action,
+        is_demo=student.is_demo,
+    )
+    db.add(prediction)
+    db.commit()
+    db.refresh(prediction)
+    return {
+        "available": True,
+        "prediction_id": prediction.id,
+        "student_id": student.id,
+        "participant_code": student.participant_code,
+        "display_name": student.display_name,
+        "probabilities": probabilities,
+        "category": result["category"],
+        "expected_index": result["index"],
+        "confidence": confidence,
+        "confidence_probability": confidence_value,
+        "model_version": result["model_version"],
+        "prediction_date": datetime.now(timezone.utc),
+        "evidence": evidence_payload,
+        "missing_features": missing_features,
+        "normalization": normalization,
+        "feature_contributions": result["explanation"],
+        "explanation_method": result["source"],
+        "recommended_action": recommended_action,
+        "formula": {
+            "normalization": "X' = (X - Xmin) / (Xmax - Xmin)",
+            "soft_voting": "pc = (1/K) Î£ pkc",
+            "probability_substitution": probability_formula,
+            "category": f"argmax pc = {result['category']}",
+            "expected_index": (
+                f"CL = 0({probabilities['Low']:.4f}) + "
+                f"0.5({probabilities['Moderate']:.4f}) + "
+                f"1({probabilities['High']:.4f}) = {result['index']:.4f}"
+            ),
+        },
+        "disclaimer": "This is a model prediction for learning support, not a medical or psychological diagnosis.",
+        "warning": result.get("warning"),
     }
 
 
@@ -306,7 +501,12 @@ def _training_rows(db: Session, is_demo: bool):
     logs = list(
         db.scalars(
             select(InteractionLog)
-            .where(InteractionLog.is_demo == is_demo)
+            .join(User, User.id == InteractionLog.student_id)
+            .where(
+                InteractionLog.is_demo == is_demo,
+                User.is_active.is_(True),
+                User.account_status == "Active",
+            )
             .order_by(InteractionLog.submission_time)
         )
     )
@@ -393,9 +593,17 @@ def train_ensemble(db: Session, is_demo: bool) -> ModelVersion:
         if n_splits >= 2
         else GroupKFold(n_splits=2)
     )
+    splits = list(splitter.split(features, labels, groups))
+    required_classes = set(CLASS_ORDER)
+    if any(
+        set(labels[train_index]) != required_classes
+        or set(groups[train_index]).intersection(set(groups[test_index]))
+        for train_index, test_index in splits
+    ):
+        raise ValueError("Insufficient data for reliable evaluation")
     predictions = np.empty(len(labels), dtype=object)
     probability_matrix = np.zeros((len(labels), len(CLASS_ORDER)))
-    for train_index, test_index in splitter.split(features, labels, groups):
+    for train_index, test_index in splits:
         scaler = MinMaxScaler().fit(features[train_index])
         train_features = scaler.transform(features[train_index])
         test_features = scaler.transform(features[test_index])
@@ -424,6 +632,14 @@ def train_ensemble(db: Session, is_demo: bool) -> ModelVersion:
         ).tolist(),
         "labels": CLASS_ORDER,
         "evaluation": f"{n_splits}-fold student-grouped cross-validation",
+        "training_samples": int(len(features)),
+        "student_groups": int(len(unique_groups)),
+        "folds": int(n_splits),
+        "class_distribution": {
+            label: int(class_counts.get(label, 0)) for label in CLASS_ORDER
+        },
+        "group_leakage": False,
+        "reliable": True,
     }
     try:
         binary = label_binarize(labels, classes=CLASS_ORDER)
@@ -474,6 +690,17 @@ def train_ensemble(db: Session, is_demo: bool) -> ModelVersion:
         student_count=len(unique_groups),
         metrics=metrics,
         feature_names=FEATURE_NAMES,
+        metadata_json={
+            "algorithm": "Soft-voting ensemble",
+            "ensemble_members": [type(model).__name__ for model in models],
+            "training_data_period": {
+                "start": min(log.submission_time for log in db.scalars(select(InteractionLog).where(InteractionLog.is_demo == is_demo))).isoformat(),
+                "end": max(log.submission_time for log in db.scalars(select(InteractionLog).where(InteractionLog.is_demo == is_demo))).isoformat(),
+            },
+            "class_labels": CLASS_ORDER,
+            "evaluation_method": f"{n_splits}-fold student-grouped cross-validation",
+            "deployment_status": "Active",
+        },
         file_path=str(path),
         artifact=artifact,
         is_demo=is_demo,

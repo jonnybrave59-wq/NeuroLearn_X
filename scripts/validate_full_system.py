@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 
 
 PREFIX = "NeuroLearn-X/"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 REQUIRED = {
     "README-FIRST.md",
     "FULL-SYSTEM-SETUP.md",
@@ -31,6 +31,7 @@ REQUIRED = {
     "backend/app/security.py",
     "backend/app/services.py",
     "backend/app/tutoring.py",
+    "backend/app/production_accounts.py",
     "backend/app/database.py",
     "backend/alembic.ini",
     "backend/alembic/versions/0001_initial.py",
@@ -38,8 +39,12 @@ REQUIRED = {
     "backend/alembic/versions/0003_adaptive_learning.py",
     "backend/alembic/versions/0004_intelligent_tutoring.py",
     "backend/alembic/versions/0005_model_artifact.py",
+    "backend/alembic/versions/0006_teacher_refinement_evidence.py",
+    "backend/alembic/versions/0007_learner_onboarding.py",
+    "backend/alembic/versions/0008_production_hardening.py",
     "backend/requirements.txt",
     "scripts/migrate_sqlite_to_postgres.py",
+    "scripts/smoke_test_deployment.py",
     "frontend/dist/index.html",
     "frontend/dist/manifest.webmanifest",
     "frontend/dist/sw.js",
@@ -82,7 +87,7 @@ def validate(path: Path) -> None:
 
         manifest = json.loads(archive.read(relative["package-manifest.json"]))
         if manifest.get("version") != VERSION or manifest.get("frontend_only") is not False:
-            raise RuntimeError("Package manifest does not identify a full-stack 1.3.0 system")
+            raise RuntimeError("Package manifest does not identify a full-stack 1.3.1 system")
 
         production_names = [
             name
@@ -101,7 +106,7 @@ def validate(path: Path) -> None:
 
         service_worker = archive.read(relative["frontend/dist/sw.js"]).decode("utf-8")
         for marker in (
-            "neurolearnx-v1.3.0",
+            "neurolearnx-v1.3.1",
             "NetworkOnly",
             "skipWaiting()",
             "clientsClaim()",

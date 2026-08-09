@@ -2,10 +2,12 @@ import {
   Background,
   Controls,
   MarkerType,
+  Position,
   ReactFlow,
   type Edge,
   type Node,
 } from "@xyflow/react";
+import dagre from "@dagrejs/dagre";
 import {
   Activity,
   Archive,
@@ -65,6 +67,7 @@ import {
   ProgressBar,
 } from "./components";
 import { ShareButton } from "./pwa";
+import { Equation } from "./Equation";
 import {
   AssessmentManagerPage,
   QuestionBankPage,
@@ -200,17 +203,29 @@ export default function TeacherApp({
 
 function TeacherOverview() {
   const [data, setData] = useState<any>(null);
+  const [selectedLearnerId, setSelectedLearnerId] = useState<number | null>(null);
+  const [reportedLoad, setReportedLoad] = useState<any>(null);
   const [error, setError] = useState("");
   useEffect(() => {
     api("/api/teacher/dashboard")
-      .then(setData)
+      .then((value: any) => {
+        setData(value);
+        setSelectedLearnerId((current) => current ?? value.recent_students?.[0]?.id ?? null);
+      })
       .catch((cause) => setError(messageOf(cause)));
   }, []);
+  useEffect(() => {
+    if (!selectedLearnerId) {
+      setReportedLoad(null);
+      return;
+    }
+    setReportedLoad(null);
+    api(`/api/teacher/students/${selectedLearnerId}/reported-cognitive-load`)
+      .then(setReportedLoad)
+      .catch((cause) => setError(messageOf(cause)));
+  }, [selectedLearnerId]);
   if (error) return <ErrorNotice message={error} />;
   if (!data) return <Loading label="Loading teacher dashboard…" />;
-  const loadData = Object.entries(data.cognitive_load_distribution).map(
-    ([name, value]) => ({ name, students: value }),
-  );
   return (
     <>
       <PageHeader
@@ -266,7 +281,7 @@ function TeacherOverview() {
         </div>
       </section>
       <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_0.75fr]">
-        <section className="rounded-2xl bg-white p-6 shadow-soft">
+        <section className="min-w-0 rounded-2xl bg-white p-6 shadow-soft">
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-lg font-black text-navy-950">
@@ -292,7 +307,19 @@ function TeacherOverview() {
               </thead>
               <tbody>
                 {data.recent_students.map((student: any) => (
-                  <tr key={student.id}>
+                  <tr
+                    key={student.id}
+                    className={`cursor-pointer ${selectedLearnerId === student.id ? "bg-cyan-50/70" : "hover:bg-slate-50"}`}
+                    tabIndex={0}
+                    onClick={() => setSelectedLearnerId(student.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSelectedLearnerId(student.id);
+                      }
+                    }}
+                    aria-label={`Show reported cognitive load for ${student.participant_code}`}
+                  >
                     <td className="font-black text-navy-950">
                       {student.participant_code}
                     </td>
@@ -301,6 +328,7 @@ function TeacherOverview() {
                     <td>
                       <Link
                         to={`/teacher/students/${student.id}`}
+                        onClick={(event) => event.stopPropagation()}
                         className="inline-flex items-center text-cyanx-600"
                         aria-label={`View ${student.participant_code}`}
                       >
@@ -313,24 +341,47 @@ function TeacherOverview() {
             </table>
           </div>
         </section>
-        <section className="rounded-2xl bg-white p-6 shadow-soft">
+        <section className="min-w-0 rounded-2xl bg-white p-6 shadow-soft">
           <h2 className="text-lg font-black text-navy-950">
             Reported cognitive load
           </h2>
           <p className="mt-1 text-xs text-slate-500">
-            Based on 1–9 mental-effort ratings
+            Selected learner's actual 1–9 mental-effort ratings; not model predictions
           </p>
-          <div className="mt-5 h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={loadData}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="name" tickLine={false} axisLine={false} />
-                <YAxis allowDecimals={false} tickLine={false} axisLine={false} />
-                <Tooltip />
-                <Bar dataKey="students" fill="#0bb7c9" radius={[8, 8, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          {!selectedLearnerId ? (
+            <p className="mt-5 text-sm text-slate-500">Select a learner to view reported cognitive load.</p>
+          ) : !reportedLoad ? (
+            <Loading label="Loading reported ratings…" />
+          ) : !reportedLoad.history.length ? (
+            <p className="mt-5 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">No reported cognitive-load data yet.</p>
+          ) : (
+            <>
+              <div className="mt-5 flex items-center justify-between rounded-xl bg-cyan-50 p-4">
+                <div>
+                  <div className="font-black text-navy-950">{reportedLoad.participant_code}</div>
+                  <div className="text-xs text-slate-500">Average of {reportedLoad.history.length} rating(s)</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-2xl font-black text-navy-950">{reportedLoad.average_rating.toFixed(2)}/9</div>
+                  <Badge tone={reportedLoad.average_category === "High" ? "rose" : reportedLoad.average_category === "Moderate" ? "amber" : "green"}>{reportedLoad.average_category}</Badge>
+                </div>
+              </div>
+              <div className="mt-4 max-h-52 overflow-auto">
+                <table className="data-table">
+                  <thead><tr><th>Activity</th><th>Date</th><th>Rating</th></tr></thead>
+                  <tbody>
+                    {reportedLoad.history.map((item: any) => (
+                      <tr key={item.id}>
+                        <td className="font-semibold text-navy-950">{item.activity}</td>
+                        <td>{new Date(item.date).toLocaleDateString()}</td>
+                        <td><Badge tone={item.category === "High" ? "rose" : item.category === "Moderate" ? "amber" : "green"}>{item.rating}/9 · {item.category}</Badge></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
         </section>
       </div>
     </>
@@ -1057,6 +1108,7 @@ const blankConcept = {
   subject: "General Mathematics",
   description: "",
   difficulty: 2,
+  active: true,
 };
 
 function ConceptManager() {
@@ -1079,6 +1131,7 @@ function ConceptManager() {
       subject: concept.subject,
       description: concept.description,
       difficulty: concept.difficulty,
+      active: concept.active,
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -1091,7 +1144,7 @@ function ConceptManager() {
       else await post("/api/teacher/concepts", form);
       setEditing(null);
       setForm(blankConcept);
-      load();
+      await load();
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -1184,7 +1237,17 @@ function ConceptManager() {
               ))}
             </select>
           </label>
-          <label className="field md:col-span-2 xl:col-span-4">
+          <label className="field">
+            <span>Status</span>
+            <select
+              value={form.active ? "Active" : "Archived"}
+              onChange={(event) => setForm({ ...form, active: event.target.value === "Active" })}
+            >
+              <option>Active</option>
+              <option>Archived</option>
+            </select>
+          </label>
+          <label className="field md:col-span-2 xl:col-span-3">
             <span>Description</span>
             <input
               value={form.description}
@@ -1236,6 +1299,7 @@ function ConceptManager() {
                     <td>
                       <div className="flex gap-2">
                         <button
+                          type="button"
                           onClick={() => edit(concept)}
                           className="icon-button"
                           aria-label={`Edit ${concept.name}`}
@@ -1243,6 +1307,7 @@ function ConceptManager() {
                           <Pencil size={16} />
                         </button>
                         <button
+                          type="button"
                           onClick={() => toggle(concept)}
                           className="icon-button"
                           aria-label={`${concept.active ? "Archive" : "Restore"} ${concept.name}`}
@@ -1272,6 +1337,8 @@ function GraphEditor() {
   const [target, setTarget] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const load = useCallback(() => {
     api("/api/teacher/graph")
       .then(setGraph)
@@ -1280,21 +1347,44 @@ function GraphEditor() {
   useEffect(load, [load]);
   const flow = useMemo(() => {
     if (!graph) return { nodes: [] as Node[], edges: [] as Edge[] };
-    const groups: Record<string, any[]> = {};
-    graph.nodes.forEach((node: any) => {
-      (groups[node.subject] ||= []).push(node);
-    });
+    const layout = new dagre.graphlib.Graph({ multigraph: true });
+    layout.setGraph({ rankdir: "LR", ranksep: 120, nodesep: 65, edgesep: 30, marginx: 35, marginy: 35 });
+    layout.setDefaultEdgeLabel(() => ({}));
+    graph.nodes.forEach((node: any) => layout.setNode(String(node.id), { width: 180, height: 76 }));
+    graph.edges.forEach((edge: any) => layout.setEdge(String(edge.source), String(edge.target), {}, String(edge.id)));
+    dagre.layout(layout);
+    const prerequisiteIds = new Set<string>();
+    if (selectedNodeId) {
+      const stack = [selectedNodeId];
+      while (stack.length) {
+        const current = stack.pop()!;
+        graph.edges
+          .filter((edge: any) => String(edge.target) === current)
+          .forEach((edge: any) => {
+            const sourceId = String(edge.source);
+            if (!prerequisiteIds.has(sourceId)) {
+              prerequisiteIds.add(sourceId);
+              stack.push(sourceId);
+            }
+          });
+      }
+    }
     const nodes: Node[] = graph.nodes.map((node: any) => {
       const subjectIndex = node.subject === "General Mathematics" ? 0 : 1;
-      const index = groups[node.subject].findIndex((item) => item.id === node.id);
+      const point = layout.node(String(node.id));
+      const selected = selectedNodeId === String(node.id);
+      const prerequisite = prerequisiteIds.has(String(node.id));
       return {
         id: String(node.id),
-        position: { x: subjectIndex * 390 + (index % 2) * 180, y: Math.floor(index / 2) * 115 },
+        position: { x: point.x - 90, y: point.y - 38 },
+        sourcePosition: Position.Right,
+        targetPosition: Position.Left,
         data: { label: `${node.code} · ${node.name}` },
         style: {
           borderRadius: 12,
-          width: 165,
-          border: `1px solid ${node.active ? "#a5e8ee" : "#cbd5e1"}`,
+          width: 180,
+          minHeight: 76,
+          border: `${selected ? 3 : prerequisite ? 2 : 1}px solid ${selected ? "#e11d48" : prerequisite ? "#079bb0" : node.active ? "#a5e8ee" : "#cbd5e1"}`,
           background: node.active ? (subjectIndex ? "#071b34" : "#eafcfd") : "#f1f5f9",
           color: node.active && subjectIndex ? "#fff" : "#071b34",
           fontSize: 11,
@@ -1303,15 +1393,21 @@ function GraphEditor() {
         },
       };
     });
-    const edges: Edge[] = graph.edges.map((edge: any) => ({
-      id: String(edge.id),
-      source: String(edge.source),
-      target: String(edge.target),
-      markerEnd: { type: MarkerType.ArrowClosed },
-      style: { stroke: "#079bb0", strokeWidth: 1.8 },
-    }));
+    const edges: Edge[] = graph.edges.map((edge: any) => {
+      const selected = selectedEdgeId === String(edge.id);
+      const connected = selectedNodeId === String(edge.target) || prerequisiteIds.has(String(edge.target));
+      return {
+        id: String(edge.id),
+        source: String(edge.source),
+        target: String(edge.target),
+        type: "smoothstep",
+        markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: selected ? "#e11d48" : connected ? "#079bb0" : "#94a3b8" },
+        style: { stroke: selected ? "#e11d48" : connected ? "#079bb0" : "#94a3b8", strokeWidth: selected ? 3 : connected ? 2.5 : 1.5 },
+        zIndex: selected ? 10 : 1,
+      };
+    });
     return { nodes, edges };
-  }, [graph]);
+  }, [graph, selectedEdgeId, selectedNodeId]);
   async function addEdge(event: React.FormEvent) {
     event.preventDefault();
     setSaving(true);
@@ -1391,11 +1487,15 @@ function GraphEditor() {
         </button>
       </form>
       <div className="grid gap-6 xl:grid-cols-[1fr_330px]">
-        <div className="h-[650px] overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-soft">
-          <ReactFlow nodes={flow.nodes} edges={flow.edges} fitView>
+        <div className="flex h-[650px] flex-col overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-soft">
+          <div className="border-b border-slate-100 px-4 py-2 text-xs font-bold text-slate-600">Prerequisite → Succeeding concept</div>
+          <ReactFlow className="min-h-0 flex-1" nodes={flow.nodes} edges={flow.edges} fitView fitViewOptions={{ padding: 0.18 }} minZoom={0.2} maxZoom={2} onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }} onNodeClick={(_event, node) => setSelectedNodeId(node.id)} onEdgeClick={(_event, edge) => setSelectedEdgeId(edge.id)}>
             <Background gap={22} color="#dbe4ea" />
             <Controls />
           </ReactFlow>
+          <div className="border-t border-slate-100 px-4 py-3 text-xs text-slate-600">
+            <span className="font-black text-navy-950">Legend:</span> Prerequisite → Succeeding concept. Select a node to highlight its prerequisite chain; use the controls to zoom, fit, or reset the view.
+          </div>
         </div>
         <section className="h-fit rounded-2xl bg-white p-5 shadow-soft">
           <h2 className="font-black text-navy-950">
@@ -1408,7 +1508,8 @@ function GraphEditor() {
               return (
                 <div
                   key={edge.id}
-                  className="flex items-center gap-2 rounded-xl bg-slate-50 p-3"
+                  onClick={() => setSelectedEdgeId(String(edge.id))}
+                  className={`flex cursor-pointer items-center gap-2 rounded-xl p-3 ${selectedEdgeId === String(edge.id) ? "bg-rose-50 ring-1 ring-rose-300" : "bg-slate-50"}`}
                 >
                   <div className="min-w-0 flex-1 text-xs">
                     <div className="truncate font-bold text-navy-950">
@@ -1452,6 +1553,9 @@ function ActivityBank() {
   const [editing, setEditing] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [showForm, setShowForm] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [search, setSearch] = useState("");
+  const [notice, setNotice] = useState("");
   const load = useCallback(() => {
     Promise.all([
       api<any[]>("/api/teacher/activities"),
@@ -1502,6 +1606,50 @@ function ActivityBank() {
       setError(messageOf(cause));
     }
   }
+  async function deleteActivity(activity: any) {
+    const dependencies = activity.dependencies || {};
+    const impact = `${dependencies.assigned_students || 0} assigned learner(s), ${dependencies.attempts || 0} attempt(s), ${dependencies.results || 0} result(s), and ${dependencies.pathway_steps || 0} pathway step(s)`;
+    if (!window.confirm(`Permanently delete activity "${activity.title}"?\n\nIt currently has ${impact}. Archive and Delete are separate actions. This cannot be undone.`)) return;
+    try {
+      const confirm = Object.values(dependencies).some((value) => Number(value) > 0);
+      await remove(`/api/teacher/activities/${activity.id}${confirm ? "?confirm_learner_record_deletion=true" : ""}`);
+      setSelected((current) => { const next = new Set(current); next.delete(activity.id); return next; });
+      setNotice(`Activity permanently deleted: ${activity.title}`);
+      load();
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  }
+  async function bulkArchive() {
+    if (!selected.size) return;
+    try {
+      await post("/api/teacher/activities/bulk", { activity_ids: Array.from(selected), action: "archive" });
+      setNotice(`${selected.size} selected activities archived.`);
+      setSelected(new Set());
+      load();
+    } catch (cause) { setError(messageOf(cause)); }
+  }
+  async function bulkDelete() {
+    const chosen = (activities || []).filter((activity) => selected.has(activity.id));
+    if (!chosen.length) return;
+    const totals = chosen.reduce((summary, activity) => {
+      Object.entries(activity.dependencies || {}).forEach(([key, value]) => { summary[key] = (summary[key] || 0) + Number(value); });
+      return summary;
+    }, {} as Record<string, number>);
+    if (!window.confirm(`Permanently delete ${chosen.length} selected activities?\n\n${chosen.map((item) => `• ${item.title}`).join("\n")}\n\nRelated records: ${totals.assigned_students || 0} assignments, ${totals.attempts || 0} attempts, ${totals.results || 0} results, ${totals.pathway_steps || 0} pathway steps. This cannot be undone.`)) return;
+    const query = new URLSearchParams();
+    chosen.forEach((activity) => query.append("activity_ids", String(activity.id)));
+    if ((Object.values(totals) as number[]).some((value) => value > 0)) query.set("confirm_learner_record_deletion", "true");
+    try {
+      await remove(`/api/teacher/activities/bulk-delete?${query.toString()}`);
+      setNotice(`${chosen.length} selected activities permanently deleted.`);
+      setSelected(new Set());
+      load();
+    } catch (cause) { setError(messageOf(cause)); }
+  }
+  const filteredActivities = (activities || []).filter((activity) =>
+    `${activity.title} ${activity.description} ${activity.activity_type}`.toLowerCase().includes(search.toLowerCase()),
+  );
   return (
     <>
       <PageHeader
@@ -1522,6 +1670,15 @@ function ActivityBank() {
         }
       />
       {error && <ErrorNotice message={error} onDismiss={() => setError("")} />}
+      {notice && <div className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-800">{notice}</div>}
+      <div className="mb-5 flex flex-wrap items-center gap-2 rounded-2xl bg-white p-4 shadow-soft">
+        <label className="field min-w-[240px] flex-1"><span>Search activities</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Title, type, or content" /></label>
+        <button onClick={() => setSelected(new Set(filteredActivities.map((item) => item.id)))} className="btn-secondary !px-3">Select current page</button>
+        <button onClick={() => setSelected(new Set(filteredActivities.map((item) => item.id)))} className="btn-secondary !px-3">Select all filtered</button>
+        <button disabled={!selected.size} onClick={() => setSelected(new Set())} className="btn-secondary !px-3">Clear selection</button>
+        <button disabled={!selected.size} onClick={bulkArchive} className="btn-secondary !px-3"><Archive size={15} /> Bulk archive</button>
+        <button disabled={!selected.size} onClick={bulkDelete} className="btn-secondary !px-3 text-rose-700"><Trash2 size={15} /> Bulk delete</button>
+      </div>
       {showForm && (
         <form
           onSubmit={submit}
@@ -1657,7 +1814,7 @@ function ActivityBank() {
         <Loading />
       ) : (
         <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
-          {activities.map((activity) => {
+          {filteredActivities.map((activity) => {
             const concept = concepts.find((item) =>
               activity.concept_ids.includes(item.id),
             );
@@ -1668,6 +1825,7 @@ function ActivityBank() {
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex gap-2">
+                    <input type="checkbox" checked={selected.has(activity.id)} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(activity.id); else next.delete(activity.id); return next; })} aria-label={`Select ${activity.title}`} className="accent-cyan-600" />
                     <Badge tone={activity.is_diagnostic ? "navy" : "cyan"}>
                       {activity.activity_type}
                     </Badge>
@@ -1681,6 +1839,7 @@ function ActivityBank() {
                     >
                       <Pencil size={15} />
                     </button>
+                    <button onClick={() => deleteActivity(activity)} className="icon-button text-rose-700" aria-label={`Permanently delete ${activity.title}`} title="Permanently delete activity"><Trash2 size={15} /></button>
                     <button
                       onClick={() => toggle(activity)}
                       className="icon-button"
@@ -1721,7 +1880,7 @@ function ActivityBank() {
                   </div>
                 </div>
                 <div className="mt-3 text-xs text-slate-500">
-                  {activity.questions.length} questions
+                  {activity.questions.length} questions · {activity.dependencies?.assigned_students || 0} assignments · {activity.dependencies?.attempts || 0} attempts
                 </div>
               </article>
             );
@@ -2007,7 +2166,7 @@ function TeacherSettings() {
     try {
       const saved = await put("/api/teacher/settings", form);
       setForm(saved);
-      setMessage("Settings saved. New recommendations will use these values.");
+      setMessage("Settings saved. Active learner pathway scores and rankings were recomputed from current records.");
     } catch (cause) {
       setError(messageOf(cause));
     }
@@ -2019,6 +2178,24 @@ function TeacherSettings() {
         title="Mastery and optimization settings"
         description="Control mastery evidence, mental-effort categories, the expert Likert scale, and the alpha/beta/gamma trade-off."
       />
+      <details className="mb-6 rounded-2xl bg-white p-6 shadow-soft">
+        <summary className="cursor-pointer text-lg font-black text-navy-950">What do these settings mean?</summary>
+        <div className="mt-5 grid gap-5 text-sm leading-6 text-slate-600 lg:grid-cols-2">
+          <div className="space-y-3">
+            <div><strong>Mastery</strong><Equation latex={String.raw`M=\frac{S_e}{S_{\max}}`} label="Mastery equals earned score divided by maximum score" /><p>M is mastery, Sₑ is the earned score, and Smax is the maximum score from saved assessment attempts.</p></div>
+            <div><strong>Learning-gap rule</strong><Equation latex={String.raw`M < \tau`} label="Mastery is below threshold tau" /><p>A gap exists when mastery is below teacher threshold τ.</p></div>
+            <div><strong>Gap Coverage</strong><Equation latex={String.raw`GC=\frac{N_a}{N_d}`} label="Gap coverage equals addressed gaps divided by detected gaps" /><p>Nₐ is addressed gaps and Nḓ is detected gaps from current learner records.</p></div>
+            <div><strong>Predicted Cognitive Load</strong><Equation latex={String.raw`PCL=\frac{1}{n}\sum_{a=1}^{n}CL_a`} label="Predicted pathway cognitive load is average activity load" /><p>PCL averages activity predictions CLₐ across n candidate activities.</p></div>
+            <div><strong>Learning Time</strong><Equation latex={String.raw`LT=\sum_{a=1}^{n}T_a`} label="Learning time is the sum of activity times" /><p>LT sums saved estimated minutes Tₐ.</p></div>
+          </div>
+          <div className="space-y-3">
+            <div><strong>Normalized Learning Time</strong><Equation latex={String.raw`NLT=\frac{LT-LT_{\min}}{LT_{\max}-LT_{\min}}`} label="Normalized learning time formula" /><p>NLT compares each candidate with the shortest and longest valid candidates.</p></div>
+            <div><strong>Adaptive Pathway Score</strong><Equation latex={String.raw`APS=\alpha GC+\beta(1-PCL)+\gamma(1-NLT)`} label="Adaptive Pathway Score formula" /><p>APS balances gap coverage, lower predicted load, and shorter time.</p></div>
+            <div><strong>Weight constraints</strong><Equation latex={String.raw`\alpha+\beta+\gamma=1,\quad \alpha,\beta,\gamma\ge 0`} label="Alpha beta and gamma total one and are non-negative" /><p>The non-negative teacher weights total exactly 1.00.</p></div>
+            <div><strong>Pathway selection</strong><Equation latex={String.raw`r^*=\operatorname*{arg\,max}_{r}APS_r`} label="Select route with maximum Adaptive Pathway Score" /><p>Ties use higher GC, lower PCL, shorter LT, then stable database ID.</p></div>
+          </div>
+        </div>
+      </details>
       {error && <ErrorNotice message={error} onDismiss={() => setError("")} />}
       {message && (
         <div className="mb-5 rounded-xl bg-emerald-50 p-4 text-sm font-bold text-emerald-800">
@@ -2091,9 +2268,7 @@ function TeacherSettings() {
               <h2 className="text-lg font-black text-navy-950">
                 Adaptive Pathway Score weights
               </h2>
-              <p className="mt-1 text-xs text-slate-500">
-                APS = αGC + β(1 − PCL) + γ(1 − NLT)
-              </p>
+              <Equation latex={String.raw`APS=\alpha GC+\beta(1-PCL)+\gamma(1-NLT)`} label="Adaptive Pathway Score formula" block={false} className="text-xs text-slate-500" />
             </div>
             <Badge tone={Math.abs(total - 1) < 1e-6 ? "green" : "rose"}>
               Total: {total.toFixed(2)}
@@ -2201,15 +2376,51 @@ function TeacherSettings() {
 
 function ModelDashboard() {
   const [versions, setVersions] = useState<any[] | null>(null);
+  const [learners, setLearners] = useState<any[]>([]);
+  const [learnerId, setLearnerId] = useState("");
+  const [prediction, setPrediction] = useState<any>(null);
+  const [predictionLoading, setPredictionLoading] = useState(false);
   const [training, setTraining] = useState(false);
   const [mode, setMode] = useState("demo");
   const [error, setError] = useState("");
+  const [learnerSearch, setLearnerSearch] = useState("");
+  const [batchNotice, setBatchNotice] = useState("");
   const load = useCallback(() => {
-    api<any[]>("/api/teacher/models")
-      .then(setVersions)
+    Promise.all([
+      api<any[]>("/api/teacher/models"),
+      api<any[]>("/api/teacher/students"),
+    ])
+      .then(([modelRows, studentRows]) => {
+        setVersions(modelRows);
+        setLearners(studentRows);
+        setLearnerId((current) => current || (studentRows[0] ? String(studentRows[0].id) : ""));
+      })
       .catch((cause) => setError(messageOf(cause)));
   }, []);
   useEffect(load, [load]);
+  useEffect(() => {
+    setPrediction(null);
+  }, [learnerId]);
+  async function runDiagnosis() {
+    if (!learnerId) return;
+    setPredictionLoading(true);
+    setError("");
+    try { setPrediction(await api(`/api/teacher/models/predict?student_id=${learnerId}`)); }
+    catch (cause) { setError(messageOf(cause)); }
+    finally { setPredictionLoading(false); }
+  }
+  async function diagnoseAll() {
+    setPredictionLoading(true);
+    setError("");
+    try {
+      const result = await post<{ items: any[]; students: number }>("/api/teacher/models/diagnose-all");
+      const available = result.items.filter((item) => item.available).length;
+      setBatchNotice(`Diagnosed ${available} of ${result.students} active learners; learners without sufficient evidence were not assigned a prediction.`);
+      const selected = result.items.find((item) => String(item.student_id) === learnerId);
+      if (selected) setPrediction(selected);
+    } catch (cause) { setError(messageOf(cause)); }
+    finally { setPredictionLoading(false); }
+  }
   async function train() {
     setTraining(true);
     setError("");
@@ -2224,17 +2435,15 @@ function ModelDashboard() {
   }
   if (!versions) return <Loading label="Loading model versions…" />;
   const active = versions.find((version) => version.active && version.is_demo === (mode === "demo"));
+  const filteredLearners = learners.filter((learner) => `${learner.participant_code} ${learner.display_name}`.toLowerCase().includes(learnerSearch.toLowerCase()));
   const metricData = active
     ? [
         { name: "Accuracy", value: active.metrics.accuracy },
         { name: "Precision", value: active.metrics.precision_macro },
         { name: "Recall", value: active.metrics.recall_macro },
         { name: "F1", value: active.metrics.f1_macro },
-        {
-          name: "ROC-AUC",
-          value: active.metrics.roc_auc_ovr_macro || 0,
-        },
-      ]
+        { name: "ROC-AUC", value: active.metrics.roc_auc_ovr_macro },
+      ].filter((item) => typeof item.value === "number")
     : [];
   return (
     <>
@@ -2263,7 +2472,90 @@ function ModelDashboard() {
         }
       />
       {error && <ErrorNotice message={error} onDismiss={() => setError("")} />}
+      {batchNotice && <p className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-800">{batchNotice}</p>}
       {mode === "demo" && <DemoNotice />}
+      <section className="mt-6 rounded-2xl bg-white p-6 shadow-soft">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h2 className="text-lg font-black text-navy-950">Learner cognitive-load prediction</h2>
+            <p className="mt-1 text-xs text-slate-500">Uses the selected active learner's recorded assessment and interaction evidence.</p>
+          </div>
+          <div className="grid gap-2 sm:w-[560px] sm:grid-cols-2">
+            <label className="field"><span>Search active learners</span><input value={learnerSearch} onChange={(event) => setLearnerSearch(event.target.value)} placeholder="Participant code or name" /></label>
+            <label className="field"><span>Active learner</span>
+            <select value={learnerId} onChange={(event) => setLearnerId(event.target.value)}>
+              {!learners.length && <option value="">No active learners</option>}
+              {filteredLearners.map((learner) => <option key={learner.id} value={learner.id}>{learner.participant_code} · {learner.display_name}</option>)}
+            </select>
+            </label>
+            <button onClick={runDiagnosis} disabled={!learnerId || predictionLoading} className="btn-primary"><BrainCircuit size={16} /> Run diagnosis</button>
+            <button onClick={diagnoseAll} disabled={predictionLoading || !learners.length} className="btn-secondary"><Users size={16} /> Diagnose all active students</button>
+          </div>
+        </div>
+        {predictionLoading ? (
+          <Loading label="Calculating learner prediction…" />
+        ) : prediction && !prediction.available ? (
+          <p className="mt-5 rounded-xl bg-amber-50 p-4 text-sm font-semibold text-amber-900">{prediction.message}</p>
+        ) : prediction?.available ? (
+          <div className="mt-6 space-y-6">
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+              {(["Low", "Moderate", "High"] as const).map((label) => (
+                <MetricCard key={label} label={`${label} probability`} value={`${(prediction.probabilities[label] * 100).toFixed(1)}%`} icon={<Gauge size={19} />} tone={label === "High" ? "rose" : label === "Moderate" ? "amber" : "cyan"} />
+              ))}
+              <MetricCard label="Predicted category" value={prediction.category} detail={`${prediction.confidence} confidence (${(prediction.confidence_probability * 100).toFixed(1)}%)`} icon={<BrainCircuit size={19} />} tone="cyan" />
+              <MetricCard label="Expected load index" value={prediction.expected_index.toFixed(3)} detail="0 = Low · 1 = High" icon={<BarChart3 size={19} />} tone="amber" />
+            </div>
+            <div className="grid gap-5 xl:grid-cols-2">
+              <section className="rounded-xl bg-slate-50 p-5">
+                <h3 className="font-black text-navy-950">Learner evidence used</h3>
+                <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                  {[
+                    ["Assessment score", `${prediction.evidence.assessment_score}/${prediction.evidence.maximum_score}`],
+                    ["Accuracy", `${(prediction.evidence.accuracy * 100).toFixed(1)}%`],
+                    ["Average response time", `${prediction.evidence.average_response_seconds.toFixed(1)} s`],
+                    ["Completion time", `${(prediction.evidence.completion_seconds / 60).toFixed(1)} min`],
+                    ["Attempts", prediction.evidence.attempts],
+                    ["Skipped questions", prediction.evidence.skipped_questions],
+                    ["Hint usage", prediction.evidence.hint_usage],
+                    ["Mental-effort rating", prediction.evidence.mental_effort_rating == null ? "Not reported" : `${prediction.evidence.mental_effort_rating}/9`],
+                  ].map(([label, value]) => <div key={String(label)}><dt className="text-xs font-bold uppercase text-slate-400">{label}</dt><dd className="mt-1 font-black text-navy-950">{value}</dd></div>)}
+                </dl>
+              </section>
+              <section className="rounded-xl bg-slate-50 p-5">
+                <h3 className="font-black text-navy-950">Model and explanation</h3>
+                <p className="mt-3 text-sm"><strong>Version:</strong> {prediction.model_version}</p>
+                <p className="text-sm"><strong>Prediction date:</strong> {new Date(prediction.prediction_date).toLocaleString()}</p>
+                <p className="mt-3 text-xs text-slate-500">{prediction.explanation_method}</p>
+                <div className="mt-4 space-y-2">
+                  {Object.entries(prediction.feature_contributions).map(([name, value]) => (
+                    <div key={name} className="flex items-center justify-between rounded-lg bg-white px-3 py-2 text-xs"><span>{name.replaceAll("_", " ")}</span><strong>{Number(value).toFixed(4)}</strong></div>
+                  ))}
+                </div>
+              </section>
+            </div>
+            <details className="rounded-xl border border-slate-200 p-5">
+              <summary className="cursor-pointer font-black text-navy-950">Formula with this learner's values</summary>
+              <div className="mt-5 space-y-5 text-sm text-slate-700">
+                <section><h4 className="font-black text-navy-950">General Formula</h4><p className="mt-1">Normalization places features with different units onto a comparable 0–1 scale. If the maximum equals the minimum, the backend safely uses zero.</p><Equation latex={String.raw`X' = \frac{X-X_{\min}}{X_{\max}-X_{\min}}`} label="X prime equals X minus X minimum divided by X maximum minus X minimum" /></section>
+                <section><h4 className="font-black text-navy-950">Ensemble Soft Voting</h4><p className="mt-1">The probability assigned to category c is averaged across all K classifiers.</p><Equation latex={String.raw`p_c = \frac{1}{K}\sum_{k=1}^{K}p_{kc}`} label="Probability for category c equals the average probability across K classifiers" /><Equation latex={String.raw`\hat{c}=\operatorname*{arg\,max}_{c}p_c`} label="The predicted category is the category with maximum probability" /></section>
+                <section><h4 className="font-black text-navy-950">Learner Values</h4><div className="mt-3 overflow-x-auto"><table className="data-table"><thead><tr><th>Value</th><th>Actual learner value</th><th>Evidence date</th><th>Data source</th></tr></thead><tbody>{[
+                  ["Assessment score", `${prediction.evidence.assessment_score}/${prediction.evidence.maximum_score}`, prediction.evidence.evidence_date, "Assessment attempt"],
+                  ["Accuracy", `${(prediction.evidence.accuracy * 100).toFixed(1)}%`, prediction.evidence.evidence_date, "Item responses"],
+                  ["Response time", `${prediction.evidence.average_response_seconds.toFixed(1)} seconds`, prediction.evidence.evidence_date, "Interaction log"],
+                  ["Completion time", `${(prediction.evidence.completion_seconds / 60).toFixed(1)} minutes`, prediction.evidence.evidence_date, "Assessment attempt"],
+                  ["Mental effort", prediction.evidence.mental_effort_rating == null ? "Missing" : `${prediction.evidence.mental_effort_rating}/9`, prediction.evidence.evidence_date, "Learner report"],
+                  ["Recent mastery", prediction.evidence.recent_mastery == null ? "Missing" : `${(prediction.evidence.recent_mastery * 100).toFixed(1)}%`, prediction.evidence.evidence_date, "Mastery record"],
+                ].map(([name, value, date, source]) => <tr key={name}><td>{name}</td><td className="font-black text-navy-950">{value}</td><td>{date ? new Date(date).toLocaleString() : "Not available"}</td><td>{source}</td></tr>)}</tbody></table></div></section>
+                <section><h4 className="font-black text-navy-950">Substitution</h4><Equation latex={`CL = 0(${prediction.probabilities.Low.toFixed(3)}) + 0.5(${prediction.probabilities.Moderate.toFixed(3)}) + 1(${prediction.probabilities.High.toFixed(3)})`} label={`Cognitive load equals zero times ${prediction.probabilities.Low.toFixed(3)} plus zero point five times ${prediction.probabilities.Moderate.toFixed(3)} plus one times ${prediction.probabilities.High.toFixed(3)}`} /></section>
+                <section><h4 className="font-black text-navy-950">Calculation</h4><Equation latex={`CL = 0 + ${(0.5 * prediction.probabilities.Moderate).toFixed(3)} + ${prediction.probabilities.High.toFixed(3)}`} label="Cognitive load weighted calculation" /></section>
+                <section className="rounded-xl bg-cyan-50 p-4"><h4 className="font-black text-navy-950">Result</h4><Equation latex={`CL = ${prediction.expected_index.toFixed(3)}`} label={`Cognitive load index ${prediction.expected_index.toFixed(3)}`} /><p><strong>Interpretation:</strong> The model predicts {prediction.category} cognitive load because that category has the highest combined probability. The index of {prediction.expected_index.toFixed(3)} supports this teaching action: {prediction.recommended_action}</p></section>
+                {prediction.missing_features?.length > 0 && <p className="rounded-lg bg-amber-50 p-3 font-semibold text-amber-900"><strong>Missing features:</strong> {prediction.missing_features.join(", ")}</p>}
+              </div>
+            </details>
+            <p className="rounded-xl bg-amber-50 p-4 text-sm font-semibold text-amber-900">{prediction.disclaimer}</p>
+          </div>
+        ) : null}
+      </section>
       {!active ? (
         <div className="mt-6">
           <Empty
@@ -2293,12 +2585,40 @@ function ModelDashboard() {
             />
             <MetricCard
               label="Grouped F1"
-              value={active.metrics.f1_macro.toFixed(3)}
+              value={typeof active.metrics.f1_macro === "number" ? active.metrics.f1_macro.toFixed(3) : "Unavailable"}
               detail={active.metrics.evaluation}
               icon={<BarChart3 size={20} />}
               tone="amber"
             />
           </div>
+          <details className="mt-5 rounded-2xl border border-cyan-200 bg-cyan-50 p-5">
+            <summary className="cursor-pointer font-black text-cyan-950">Model Version <span className="ml-1 inline-grid h-5 w-5 place-items-center rounded-full bg-cyan-700 text-xs text-white" aria-label="Model version help">?</span></summary>
+            <p className="mt-3 text-sm leading-6 text-cyan-950">Model version identifies the exact trained cognitive-load model used to generate a prediction. It helps teachers and researchers know which model configuration, training data, features, and evaluation results produced the prediction.</p>
+            <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-3">
+              {[
+                ["Version name", active.version], ["Training date", new Date(active.trained_at).toLocaleString()], ["Algorithm", active.metadata?.algorithm || "Soft-voting ensemble"],
+                ["Ensemble members", active.metadata?.ensemble_members?.join(", ") || "Logistic Regression, Random Forest, Gradient Boosting"], ["Feature set", active.feature_names.join(", ")],
+                ["Training-data period", active.metadata?.training_data_period ? `${new Date(active.metadata.training_data_period.start).toLocaleDateString()} – ${new Date(active.metadata.training_data_period.end).toLocaleDateString()}` : "Not recorded for this historical version"],
+                ["Valid samples", active.sample_size], ["Student groups", active.student_count], ["Class labels", active.metadata?.class_labels?.join(", ") || "Low, Moderate, High"],
+                ["Evaluation", active.metadata?.evaluation_method || active.metrics.evaluation], ["Deployment status", active.metadata?.deployment_status || (active.active ? "Active" : "Historical")], ["Current active model", active.active ? "Yes" : "No"],
+              ].map(([label, value]) => <div key={String(label)} className="rounded-lg bg-white/80 p-3"><dt className="text-xs font-bold uppercase text-cyan-700">{label}</dt><dd className="mt-1 break-words font-semibold text-navy-950">{value}</dd></div>)}
+            </dl>
+          </details>
+          <section className="mt-5 rounded-2xl bg-white p-5 shadow-soft">
+            <h2 className="font-black text-navy-950">Evaluation design</h2>
+            <h3 className="mt-4 font-black text-navy-950">Why are these metrics grouped by student?</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-600">Grouped evaluation keeps all records from the same student in only one fold. This prevents the model from learning a student's pattern during training and then being tested on that same student. It provides a more honest estimate of how the model may perform for learners it has not seen before.</p>
+            <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2 xl:grid-cols-4">
+              <div><dt className="text-xs font-bold uppercase text-slate-400">Training samples</dt><dd className="mt-1 font-black text-navy-950">{active.metrics.training_samples ?? active.sample_size}</dd></div>
+              <div><dt className="text-xs font-bold uppercase text-slate-400">Student groups</dt><dd className="mt-1 font-black text-navy-950">{active.metrics.student_groups ?? active.student_count}</dd></div>
+              <div><dt className="text-xs font-bold uppercase text-slate-400">Folds</dt><dd className="mt-1 font-black text-navy-950">{active.metrics.folds ?? "Not recorded"}</dd></div>
+              <div><dt className="text-xs font-bold uppercase text-slate-400">Group leakage</dt><dd className="mt-1 font-black text-emerald-700">{active.metrics.group_leakage === false ? "None" : "Not recorded"}</dd></div>
+            </dl>
+            <div className="mt-4 text-sm text-slate-600"><strong>Class distribution:</strong> {active.metrics.class_distribution ? Object.entries(active.metrics.class_distribution).map(([label, count]) => `${label}: ${count}`).join(" · ") : "Not recorded for this model version"}</div>
+            <div className="mt-4 grid gap-3 text-xs leading-5 text-slate-600 sm:grid-cols-2 xl:grid-cols-5">{[
+              ["Accuracy", "Share of all predictions that were correct."], ["Precision", "How often a predicted class was correct."], ["Recall", "How many records of each actual class were found."], ["F1-score", "Balanced mean of precision and recall."], ["One-vs-rest ROC-AUC", "How well each class is separated from the other classes."],
+            ].map(([name, description]) => <div key={name} className="rounded-lg bg-slate-50 p-3"><strong className="text-navy-950">{name}</strong><p>{description}</p></div>)}</div>
+          </section>
           {active.warning && (
             <p className="mt-5 rounded-xl bg-amber-50 p-4 text-sm font-semibold text-amber-900">
               {active.warning}
@@ -2326,13 +2646,14 @@ function ModelDashboard() {
                 Confusion matrix
               </h2>
               <p className="mt-1 text-xs text-slate-500">
-                Rows are actual; columns are predicted.
+                The confusion matrix compares the learner's actual cognitive-load category with the model's prediction. Correct predictions appear on the diagonal. Values outside the diagonal show which categories the model confused.
               </p>
+              <div className="mt-3 flex gap-4 text-xs"><span className="rounded bg-emerald-100 px-2 py-1 font-bold text-emerald-800">Correct prediction</span><span className="rounded bg-rose-100 px-2 py-1 font-bold text-rose-800">Misclassification</span></div>
               <div className="mt-5 overflow-x-auto">
                 <table className="w-full text-center text-sm">
                   <thead>
                     <tr>
-                      <th className="p-2"></th>
+                      <th className="p-2 text-xs text-slate-500">Actual ↓ / Predicted →</th>
                       {active.metrics.labels.map((label: string) => (
                         <th key={label} className="p-2 text-xs text-slate-500">
                           {label}
@@ -2350,9 +2671,10 @@ function ModelDashboard() {
                           {row.map((value, column) => (
                             <td
                               key={column}
-                              className="m-1 rounded-lg bg-cyan-50 p-3 font-black text-cyan-900"
+                              className={`m-1 rounded-lg p-3 font-black ${index === column ? "bg-emerald-100 text-emerald-900" : "bg-rose-50 text-rose-900"}`}
+                              title={`${value} record(s): actual ${active.metrics.labels[index]}, predicted ${active.metrics.labels[column]}`}
                             >
-                              {value}
+                              <span className="block">{value}</span><span className="text-[10px] font-semibold">{row.reduce((sum, item) => sum + item, 0) ? `${((value / row.reduce((sum, item) => sum + item, 0)) * 100).toFixed(1)}%` : "0.0%"}</span>
                             </td>
                           ))}
                         </tr>
@@ -2409,15 +2731,28 @@ function PathwayComparison() {
   const [students, setStudents] = useState<any[]>([]);
   const [studentId, setStudentId] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   useEffect(() => {
     api<any[]>("/api/teacher/students").then(setStudents);
   }, []);
-  useEffect(() => {
+  const loadPathways = useCallback(() => {
     const suffix = studentId ? `?student_id=${studentId}` : "";
     api<any[]>(`/api/teacher/pathways${suffix}`)
       .then(setPathways)
       .catch((cause) => setError(messageOf(cause)));
   }, [studentId]);
+  useEffect(loadPathways, [loadPathways]);
+  async function deletePathway(pathway: any) {
+    if (!window.confirm(`Permanently delete the saved pathway comparison "${pathway.label}" for ${pathway.participant_code}?`)) return;
+    try {
+      await remove(`/api/teacher/pathways/${pathway.id}`);
+      setNotice(`${pathway.label} was permanently deleted.`);
+      setError("");
+      await loadPathways();
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  }
   return (
     <>
       <PageHeader
@@ -2440,6 +2775,7 @@ function PathwayComparison() {
         }
       />
       {error && <ErrorNotice message={error} />}
+      {notice && <div className="mb-5 rounded-xl bg-emerald-50 p-4 text-sm font-bold text-emerald-800">{notice}</div>}
       {!pathways ? (
         <Loading />
       ) : !pathways.length ? (
@@ -2457,8 +2793,8 @@ function PathwayComparison() {
               }`}
             >
               <div className="flex items-center justify-between gap-3">
-                <Badge tone="navy">{pathway.participant_code}</Badge>
-                {pathway.selected && <Badge tone="cyan">Selected</Badge>}
+                <div className="flex gap-2"><Badge tone="navy">{pathway.participant_code}</Badge><Badge tone="slate">Rank #{pathway.rank}</Badge></div>
+                <div className="flex items-center gap-2">{pathway.selected && <Badge tone="cyan">Selected</Badge>}<button onClick={() => deletePathway(pathway)} className="icon-button text-rose-700" aria-label={`Delete ${pathway.label}`}><Trash2 size={16} /></button></div>
               </div>
               <h2 className="mt-4 text-xl font-black text-navy-950">
                 {pathway.label}
@@ -2481,9 +2817,22 @@ function PathwayComparison() {
                   </div>
                 ))}
               </div>
-              <p className="mt-5 text-sm leading-6 text-slate-600">
-                {pathway.explanation}
-              </p>
+              <div className="mt-4 rounded-xl bg-cyan-50 p-3 text-xs text-cyan-900">
+                <div className="font-black">Weighted contributions</div>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  <span>αGC {Number(pathway.weighted_contributions.gap_coverage).toFixed(3)}</span>
+                  <span>β(1−PCL) {Number(pathway.weighted_contributions.load_suitability).toFixed(3)}</span>
+                  <span>γ(1−NLT) {Number(pathway.weighted_contributions.time_efficiency).toFixed(3)}</span>
+                </div>
+                <Equation latex={`${Number(pathway.weights.alpha).toFixed(2)}(${Number(pathway.gap_coverage).toFixed(3)})+${Number(pathway.weights.beta).toFixed(2)}(1-${Number(pathway.predicted_cognitive_load).toFixed(3)})+${Number(pathway.weights.gamma).toFixed(2)}(1-${Number(pathway.normalized_learning_time).toFixed(3)})=${Number(pathway.adaptive_pathway_score).toFixed(3)}`} label={`Adaptive Pathway Score equals ${Number(pathway.adaptive_pathway_score).toFixed(3)}`} />
+              </div>
+              <dl className="mt-4 space-y-2 text-sm">
+                <div><dt className="font-bold text-navy-950">Estimated time</dt><dd>{pathway.total_minutes} minutes</dd></div>
+                <div><dt className="font-bold text-navy-950">Prerequisite sequence</dt><dd>{pathway.prerequisite_sequence.join(" → ") || "No prerequisite steps"}</dd></div>
+                <div><dt className="font-bold text-navy-950">Learning gaps addressed</dt><dd>{pathway.learning_gaps_addressed.join(", ") || "No current gaps"}</dd></div>
+              </dl>
+              <p className="mt-4 rounded-xl bg-slate-50 p-3 text-sm leading-6 text-slate-700">{pathway.selection_reason}</p>
+              <p className="mt-3 text-xs text-slate-500">Tie-breaker: {pathway.tie_breaker}</p>
             </article>
           ))}
         </div>

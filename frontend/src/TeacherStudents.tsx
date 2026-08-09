@@ -78,6 +78,7 @@ function statusTone(status: string) {
 export default function StudentManagementPage() {
   const navigate = useNavigate();
   const [listView, setListView] = useState<"active" | "archived">("active");
+  const [showDeactivated, setShowDeactivated] = useState(false);
   const [result, setResult] = useState<StudentResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -112,6 +113,8 @@ export default function StudentManagementPage() {
     if (listView === "archived") {
       params.set("account_status", "Archived");
       params.set("include_archived", "true");
+    } else if (showDeactivated) {
+      params.set("include_deactivated", "true");
     }
     Object.entries(filters).forEach(([key, value]) => {
       if (value && !(listView === "archived" && key === "account_status")) {
@@ -119,7 +122,7 @@ export default function StudentManagementPage() {
       }
     });
     return params.toString();
-  }, [filters, listView, page, sortBy, sortOrder]);
+  }, [filters, listView, page, showDeactivated, sortBy, sortOrder]);
 
   const loadStudents = useCallback(async () => {
     setLoading(true);
@@ -225,6 +228,20 @@ export default function StudentManagementPage() {
           <Archive size={16} /> Archived Students
         </button>
       </div>
+      {listView === "active" && (
+        <label className="mb-5 ml-3 inline-flex items-center gap-2 text-sm font-bold text-slate-700">
+          <input
+            type="checkbox"
+            checked={showDeactivated}
+            onChange={(event) => {
+              setShowDeactivated(event.target.checked);
+              if (!event.target.checked) updateFilter("account_status", "");
+            }}
+            className="accent-cyan-600"
+          />
+          Show deactivated learners
+        </label>
+      )}
       {error && <ErrorNotice message={error} onDismiss={() => setError("")} />}
       {notice && (
         <div className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
@@ -255,7 +272,7 @@ export default function StudentManagementPage() {
               placeholder="Search by student name or ID"
             />
           </label>
-          {listView === "active" && <select
+          {listView === "active" && showDeactivated && <select
             className="input lg:max-w-44"
             value={filters.account_status}
             onChange={(event) => updateFilter("account_status", event.target.value)}
@@ -443,11 +460,16 @@ export default function StudentManagementPage() {
                                 <>
                                   <ActionButton icon={KeyRound} label="Reset password" onClick={() => requestAction(student, "reset_password")} />
                                   {student.account_status === "Active" ? (
-                                    <ActionButton icon={Power} label="Deactivate account" onClick={() => requestAction(student, "deactivate")} />
+                                    <>
+                                      <ActionButton icon={Power} label="Deactivate account" onClick={() => requestAction(student, "deactivate")} />
+                                      <ActionButton icon={Archive} label="Archive student" onClick={() => requestAction(student, "archive")} />
+                                    </>
                                   ) : (
-                                    <ActionButton icon={RefreshCcw} label="Reactivate account" onClick={() => requestAction(student, "reactivate")} />
+                                    <>
+                                      <ActionButton icon={RefreshCcw} label="Reactivate account" onClick={() => requestAction(student, "reactivate")} />
+                                      <ActionButton icon={X} label="Permanently remove learner" onClick={() => requestAction(student, "remove")} danger />
+                                    </>
                                   )}
-                                  <ActionButton icon={Archive} label="Archive student" onClick={() => requestAction(student, "archive")} />
                                 </>
                               )}
                             </div>
@@ -554,6 +576,9 @@ function actionExplanation(action: string, name: string) {
   }
   if (action === "reactivate") {
     return `${name} will regain access to their existing dashboard and records.`;
+  }
+  if (action === "remove") {
+    return `${name} and all linked learner attempts, ratings, mastery evidence, pathways, and profile records will be permanently deleted. This cannot be undone.`;
   }
   return `${name} will be archived and unable to sign in. Assessment history, mastery, learning gaps, pathways, and audit records will be preserved.`;
 }

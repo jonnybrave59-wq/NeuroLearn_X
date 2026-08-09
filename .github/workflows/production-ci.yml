@@ -1,0 +1,75 @@
+name: NeuroLearn-X Production CI
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-production-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: python -m pip install --disable-pip-version-check -r backend/requirements.txt
+
+      - name: Run Alembic from an empty database
+        working-directory: backend
+        env:
+          DATABASE_URL: sqlite:////tmp/neurolearnx-migration-test.db
+        run: python -m alembic upgrade head
+
+      - name: Run backend tests
+        working-directory: backend
+        run: python -m pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Test and build the production PWA
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Validate production environment rules
+        env:
+          APP_ENV: production
+          DATABASE_URL: postgresql+psycopg://user:password@db.internal/neurolearnx
+          SECRET_KEY: ci-only-secret-value-with-more-than-thirty-two-characters
+          PRODUCTION_TEACHER_PASSWORD: PrivateTeacher!2026
+          PRODUCTION_DEMO_STUDENT_PASSWORD: PrivateStudent!2026
+          COOKIE_SECURE: "1"
+          COOKIE_SAMESITE: lax
+          PUBLIC_APP_URL: https://neurolearnx-ci.example
+          ALLOWED_ORIGINS: https://neurolearnx-ci.example
+          CREATE_TABLES_ON_STARTUP: "0"
+          SEED_DEMO_ON_STARTUP: "0"
+          SEED_DEMO_IF_EMPTY: "0"
+        run: python scripts/validate_deployment.py
+
+      - name: Reject development endpoints and private addresses in production assets
+        shell: bash
+        run: |
+          if grep -RIE 'https?://(localhost|127\.|192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)' frontend/dist; then
+            echo "Production assets contain a development or private-network URL."
+            exit 1
+          fi
+
+      - name: Build the production container
+        run: docker build --tag neurolearnx:ci .

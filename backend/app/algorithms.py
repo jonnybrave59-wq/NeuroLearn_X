@@ -160,4 +160,13 @@ def rank_candidates(
             beta,
             gamma,
         )
-    return sorted(candidates, key=lambda candidate: candidate.score, reverse=True)
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            -candidate.score,
+            -candidate.gap_coverage,
+            candidate.predicted_load,
+            candidate.total_minutes,
+            tuple(candidate.activity_ids),
+        ),
+    )

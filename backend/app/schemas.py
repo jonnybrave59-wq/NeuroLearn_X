@@ -118,9 +118,10 @@ class StudentActionInput(BaseModel):
 class ConceptInput(BaseModel):
     code: str = Field(min_length=2, max_length=30)
     name: str = Field(min_length=2, max_length=150)
-    subject: str
-    description: str
+    subject: str = Field(min_length=2, max_length=80)
+    description: str = Field(min_length=2, max_length=5000)
     difficulty: int = Field(ge=1, le=5)
+    active: bool = True
 
 
 class EdgeInput(BaseModel):
@@ -138,6 +139,19 @@ class ActivityInput(BaseModel):
     resource_url: str | None = None
     concept_ids: list[int] = Field(min_length=1)
     is_diagnostic: bool = False
+
+
+class ActivityBulkInput(BaseModel):
+    activity_ids: list[int] = Field(min_length=1, max_length=500)
+    action: str
+    confirm_learner_record_deletion: bool = False
+
+    @field_validator("action")
+    @classmethod
+    def valid_action(cls, value: str):
+        if value not in {"archive", "delete"}:
+            raise ValueError("Unsupported activity bulk action")
+        return value
 
 
 class ChoiceInput(BaseModel):
@@ -204,6 +218,7 @@ class QuestionBankInput(BaseModel):
             "True or false",
             "Identification",
             "Short answer",
+            "Problem solving",
         }
         if self.question_type not in allowed_types:
             raise ValueError("Unsupported question type")
@@ -234,6 +249,11 @@ class DocumentGenerationInput(BaseModel):
     include_hints: bool = True
     include_prerequisites: bool = False
     include_calculations: bool = False
+    include_solutions: bool = True
+    concept_focus: list[str] = Field(default_factory=list, max_length=20)
+    target_misconception: str = Field(default="", max_length=500)
+    language: str = Field(default="English", min_length=2, max_length=60)
+    source_grounding: bool = True
 
     @field_validator("question_type")
     @classmethod
@@ -243,6 +263,8 @@ class DocumentGenerationInput(BaseModel):
             "True or false",
             "Identification",
             "Short answer",
+            "Problem solving",
+            "Mixed",
         }:
             raise ValueError("Unsupported question type")
         return value
@@ -258,6 +280,29 @@ class QuestionBatchInput(BaseModel):
         if value not in {"regenerate", "archive", "save"}:
             raise ValueError("Unsupported batch action")
         return value
+
+
+class QuestionBulkEditInput(BaseModel):
+    question_ids: list[int] = Field(min_length=1, max_length=500)
+    concept_id: int | None = None
+    difficulty: str | None = Field(default=None, max_length=20)
+    status: str | None = Field(default=None, max_length=20)
+    learning_competency: str | None = Field(default=None, max_length=1000)
+    question_type: str | None = Field(default=None, max_length=30)
+    cognitive_level: str | None = Field(default=None, max_length=40)
+    misconception_id: int | None = None
+
+    @model_validator(mode="after")
+    def has_change(self):
+        if not any(
+            value is not None
+            for name, value in self.model_dump().items()
+            if name != "question_ids"
+        ):
+            raise ValueError("Choose at least one shared field to update")
+        if self.status and self.status not in {"Draft", "Ready", "Published", "Archived"}:
+            raise ValueError("Unsupported question status")
+        return self
 
 
 class AssessmentInput(BaseModel):

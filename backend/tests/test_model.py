@@ -12,5 +12,7 @@ def test_grouped_ensemble_training_uses_student_groups():
         assert "student-grouped" in version.metrics["evaluation"]
         assert len(version.metrics["confusion_matrix"]) == 3
         assert 0 <= version.metrics["accuracy"] <= 1
+        assert version.metrics["group_leakage"] is False
+        assert version.metrics["folds"] >= 2
+        assert sum(version.metrics["class_distribution"].values()) == version.sample_size
         assert version.warning == "Demonstration Data – Not a Research Result."
-

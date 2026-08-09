@@ -12,9 +12,12 @@ TEST_DB.unlink(missing_ok=True)
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB.as_posix()}"
 os.environ["CREATE_TABLES_ON_STARTUP"] = "1"
 os.environ["SECRET_KEY"] = "test-secret-only"
+os.environ["AI_PROVIDER"] = "test-grounded"
+os.environ["AI_MODEL"] = "deterministic-test-double"
+os.environ["AI_API_KEY"] = "test-only"
 
 from app.database import Base, SessionLocal, engine  # noqa: E402
-from app.main import app  # noqa: E402
+from app.main import RATE_BUCKETS, app  # noqa: E402
 from app.seed import seed_database  # noqa: E402
 
 
@@ -30,6 +33,7 @@ def seeded_database():
 
 @pytest.fixture()
 def client():
+    RATE_BUCKETS.clear()
     with TestClient(app) as test_client:
         yield test_client
 
@@ -60,4 +64,3 @@ def teacher_client(client):
     )
     assert response.status_code == 200
     return client
-

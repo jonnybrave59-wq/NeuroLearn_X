@@ -210,7 +210,7 @@ def main() -> None:
     parser.add_argument("--production-url", required=True)
     parser.add_argument("--exe", required=True, type=Path)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--version", default="1.3.0")
+    parser.add_argument("--version", default="1.3.1")
     parser.add_argument("--release-date", default="August 2, 2026")
     parser.add_argument(
         "--contact",

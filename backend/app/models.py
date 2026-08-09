@@ -7,12 +7,14 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     LargeBinary,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -62,6 +64,10 @@ class StudentProfile(Base, TimestampMixin):
     strand: Mapped[str] = mapped_column(String(30), default="STEM")
     section: Mapped[str | None] = mapped_column(String(80))
     target_concept_id: Mapped[int | None] = mapped_column(ForeignKey("concepts.id"))
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    onboarding_version: Mapped[str] = mapped_column(String(20), default="1.0")
     user: Mapped[User] = relationship(back_populates="student_profile")
 
 
@@ -92,6 +98,9 @@ class LoginHistory(Base):
 
 class UploadedDocument(Base, TimestampMixin):
     __tablename__ = "uploaded_documents"
+    __table_args__ = (
+        Index("ix_uploaded_documents_owner_status", "uploaded_by", "processing_status"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     original_filename: Mapped[str] = mapped_column(String(255))
     file_type: Mapped[str] = mapped_column(String(20), index=True)
@@ -144,6 +153,7 @@ class Activity(Base, TimestampMixin):
     resource_url: Mapped[str | None] = mapped_column(String(500))
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     is_diagnostic: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_onboarding_diagnostic: Mapped[bool] = mapped_column(Boolean, default=False)
     is_demo: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
 
@@ -200,6 +210,7 @@ class Question(Base, TimestampMixin):
         String(30), default="Needs review", index=True
     )
     validation_flags: Mapped[list] = mapped_column(JSON, default=list)
+    generation_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
     distractor_rationales: Mapped[dict] = mapped_column(JSON, default=dict)
     is_calculation: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(20), default="Draft", index=True)
@@ -276,6 +287,20 @@ class AssessmentAssignment(Base):
 
 class AssessmentAttempt(Base, TimestampMixin):
     __tablename__ = "assessment_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "student_id",
+            "activity_id",
+            "started_at",
+            name="uq_assessment_attempt_submission",
+        ),
+        Index(
+            "ix_assessment_attempts_student_activity_submitted",
+            "student_id",
+            "activity_id",
+            "submitted_at",
+        ),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     activity_id: Mapped[int] = mapped_column(ForeignKey("activities.id"), index=True)
@@ -344,6 +369,9 @@ class MentalEffortRating(Base, TimestampMixin):
 
 class MasteryRecord(Base, TimestampMixin):
     __tablename__ = "mastery_records"
+    __table_args__ = (
+        Index("ix_mastery_records_student_concept_created", "student_id", "concept_id", "created_at"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     concept_id: Mapped[int] = mapped_column(ForeignKey("concepts.id"), index=True)
@@ -356,6 +384,9 @@ class MasteryRecord(Base, TimestampMixin):
 
 class LearningGap(Base, TimestampMixin):
     __tablename__ = "learning_gaps"
+    __table_args__ = (
+        Index("ix_learning_gaps_student_resolved_concept", "student_id", "resolved_at", "concept_id"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     concept_id: Mapped[int] = mapped_column(ForeignKey("concepts.id"), index=True)
@@ -368,6 +399,22 @@ class LearningGap(Base, TimestampMixin):
 
 class PathwayRecommendation(Base, TimestampMixin):
     __tablename__ = "pathway_recommendations"
+    __table_args__ = (
+        Index(
+            "uq_pathways_one_active_selected_per_student",
+            "student_id",
+            unique=True,
+            postgresql_where=text("selected IS TRUE AND active IS TRUE"),
+            sqlite_where=text("selected = 1 AND active = 1"),
+        ),
+        Index(
+            "ix_pathways_student_active_selected_created",
+            "student_id",
+            "active",
+            "selected",
+            "created_at",
+        ),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     target_concept_id: Mapped[int] = mapped_column(ForeignKey("concepts.id"), index=True)
@@ -444,11 +491,38 @@ class ModelVersion(Base, TimestampMixin):
     student_count: Mapped[int] = mapped_column(Integer)
     metrics: Mapped[dict] = mapped_column(JSON, default=dict)
     feature_names: Mapped[list] = mapped_column(JSON, default=list)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     file_path: Mapped[str | None] = mapped_column(String(500))
     artifact: Mapped[bytes | None] = mapped_column(LargeBinary)
     is_demo: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     warning: Mapped[str | None] = mapped_column(Text)
+
+
+class CognitiveLoadPrediction(Base, TimestampMixin):
+    __tablename__ = "cognitive_load_predictions"
+    __table_args__ = (
+        Index(
+            "ix_cognitive_load_predictions_student_evidence",
+            "student_id",
+            "evidence_date",
+        ),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    model_version_id: Mapped[int] = mapped_column(
+        ForeignKey("model_versions.id"), index=True
+    )
+    evidence_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    probabilities: Mapped[dict] = mapped_column(JSON, default=dict)
+    predicted_category: Mapped[str] = mapped_column(String(20), index=True)
+    expected_index: Mapped[float] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    missing_features: Mapped[list] = mapped_column(JSON, default=list)
+    feature_contributions: Mapped[dict] = mapped_column(JSON, default=dict)
+    recommended_action: Mapped[str] = mapped_column(Text, default="")
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
 
 class SystemSetting(Base, TimestampMixin):

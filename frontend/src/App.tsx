@@ -128,7 +128,10 @@ export default function App() {
   return (
     <Routes>
       <Route path="/download" element={<DownloadPage />} />
-      <Route path="/register/student" element={<StudentRegistrationPage />} />
+      <Route
+        path="/register/student"
+        element={<StudentRegistrationPage onRegistered={setUser} />}
+      />
       <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route
         path="/"
@@ -551,12 +554,14 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
               </Link>
             )}
           </div>
-          <div className="mt-6 rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-xs leading-5 text-cyan-900">
-            <strong>Development demo:</strong>{" "}
-            {expectedRole === "student"
-              ? "STEM001 / LearnX!2026"
-              : "TEACHER01 / NeuroTeach!2026"}
-          </div>
+          {(import.meta.env.DEV || import.meta.env.VITE_SHOW_DEMO_CREDENTIALS === "true") && (
+            <div className="mt-6 rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-xs leading-5 text-cyan-900">
+              <strong>Development demo:</strong>{" "}
+              {expectedRole === "student"
+                ? "STEM001 / LearnX!2026"
+                : "TEACHER01 / NeuroTeach!2026"}
+            </div>
+          )}
         </div>
       </section>
     </main>

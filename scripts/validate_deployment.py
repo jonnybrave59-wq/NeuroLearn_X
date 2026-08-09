@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from urllib.parse import urlsplit
 
@@ -60,6 +61,23 @@ def main() -> int:
         errors.append("DATABASE_URL must point to persistent PostgreSQL.")
     if len(secret_key) < 32 or secret_key.startswith("replace-"):
         errors.append("SECRET_KEY must be a random value of at least 32 characters.")
+    for name in (
+        "PRODUCTION_TEACHER_PASSWORD",
+        "PRODUCTION_DEMO_STUDENT_PASSWORD",
+    ):
+        value = os.getenv(name, "")
+        if (
+            len(value) < 10
+            or value.startswith("replace-")
+            or value in {"NeuroTeach!2026", "LearnX!2026"}
+            or not re.search(r"[A-Z]", value)
+            or not re.search(r"[a-z]", value)
+            or not re.search(r"\d", value)
+            or not re.search(r"[^A-Za-z0-9]", value)
+        ):
+            errors.append(
+                f"{name} must be a strong private password and cannot reuse a published credential."
+            )
     if os.getenv("COOKIE_SECURE") != "1":
         errors.append("COOKIE_SECURE must be 1 for HTTPS deployment.")
     cookie_samesite = os.getenv("COOKIE_SAMESITE", "lax").lower()
@@ -82,6 +100,47 @@ def main() -> int:
         errors.append("ALLOWED_ORIGINS entries must be clean HTTPS origins without paths.")
     if os.getenv("CREATE_TABLES_ON_STARTUP", "0") != "0":
         errors.append("CREATE_TABLES_ON_STARTUP must be 0; Alembic manages production schema.")
+    if os.getenv("SEED_DEMO_ON_STARTUP", "0") != "0" or os.getenv(
+        "SEED_DEMO_IF_EMPTY", "0"
+    ) != "0":
+        errors.append(
+            "Production startup seeding must be disabled; migrate or seed records explicitly."
+        )
+
+    ai_provider = os.getenv("AI_PROVIDER", "").strip()
+    ai_model = os.getenv("AI_MODEL", "").strip()
+    ai_key = (
+        os.getenv("AI_API_KEY", "").strip()
+        or os.getenv("OPENAI_API_KEY", "").strip()
+    )
+    if any((ai_provider, ai_model, ai_key)) and not all((ai_provider, ai_model, ai_key)):
+        errors.append(
+            "AI_PROVIDER, AI_MODEL, and AI_API_KEY must be configured together."
+        )
+    if all((ai_provider, ai_model, ai_key)):
+        ai_base_url = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").strip()
+        if not ai_base_url.startswith("https://"):
+            errors.append("AI_BASE_URL must use HTTPS in production.")
+
+    numeric_limits = {
+        "DB_CONNECT_TIMEOUT_SECONDS": (1, 120, 10),
+        "DB_STATEMENT_TIMEOUT_MS": (1000, 300000, 30000),
+        "DB_POOL_SIZE": (1, 50, 5),
+        "DB_MAX_OVERFLOW": (0, 100, 5),
+        "DB_POOL_RECYCLE_SECONDS": (30, 3600, 300),
+        "DB_POOL_TIMEOUT_SECONDS": (1, 120, 15),
+        "MAX_UPLOAD_SIZE_MB": (1, 50, 10),
+        "UPLOAD_PROCESSING_TIMEOUT_SECONDS": (5, 300, 45),
+        "UVICORN_LIMIT_CONCURRENCY": (10, 1000, 100),
+    }
+    for name, (minimum, maximum, default) in numeric_limits.items():
+        try:
+            value = int(os.getenv(name, str(default)))
+        except ValueError:
+            errors.append(f"{name} must be an integer.")
+            continue
+        if not minimum <= value <= maximum:
+            errors.append(f"{name} must be between {minimum} and {maximum}.")
     if errors:
         print("Unsafe deployment configuration:", file=sys.stderr)
         for error in errors:

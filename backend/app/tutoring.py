@@ -597,4 +597,6 @@ def update_summary_effort(db: Session, attempt_id: int, rating: MentalEffortRati
         return
     summary = dict(row.summary or {})
     summary["mental_effort"] = {"rating": rating.rating, "category": rating.category}
+    summary["analysis_complete"] = True
+    summary["next_action"] = "Review your personalized mastery results and guided pathway."
     row.summary = summary

@@ -20,14 +20,15 @@ There is no second frontend host, launcher page, iframe, or redirect layer.
 
 The Blueprint generates `SECRET_KEY`, injects PostgreSQL's private connection
 string, enables secure cookies, approves the exact Capacitor WebView origin,
-runs Alembic on every container start, and seeds demo records only when the
-database has no users. It never puts database credentials or secrets in the
-frontend or APK.
+runs Alembic on every container start, and rotates only the published local
+demo passwords to provider-managed production secrets. It never puts database
+credentials or secrets in the frontend or APK.
 
-The bundled Blueprint uses Render's free plans so it can be created without an
-automatic paid commitment. For a time-critical research defense, upgrade the
-web service and database to paid always-on plans after reviewing Render's
-current pricing, backup, retention, and recovery options.
+The bundled Blueprint deliberately uses a paid Starter web service and a paid
+Basic-256MB PostgreSQL 18 database with 5 GB storage. Render's free PostgreSQL
+databases expire and do not provide production backup guarantees, so the free
+tier is not appropriate for retained research records. Review and approve the
+current provider price before applying the Blueprint.
 
 ## Runtime commands
 
@@ -36,7 +37,7 @@ Render builds with the root `Dockerfile`. The image runs:
 ```text
 python /app/scripts/validate_deployment.py
 python -m alembic upgrade head
-python -m app.seed_if_empty
+python -m app.production_accounts
 python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=*
 ```
 
@@ -54,13 +55,16 @@ The Blueprint configures all required values:
 | `APP_ENV` | `production` |
 | `DATABASE_URL` | Render PostgreSQL `connectionString` |
 | `SECRET_KEY` | Render-generated random secret |
+| `PRODUCTION_TEACHER_PASSWORD` | Provider-managed strong secret; never use the published local password |
+| `PRODUCTION_DEMO_STUDENT_PASSWORD` | Provider-managed strong secret shared only with authorized demo learners |
 | `COOKIE_SECURE` | `1` |
 | `COOKIE_SAMESITE` | `none`, required by the separately bundled Android origin |
 | `CAPACITOR_ORIGINS` | `https://localhost` (the Capacitor WebView origin, not a backend URL) |
 | `CREATE_TABLES_ON_STARTUP` | `0`; Alembic owns the schema |
-| `SEED_DEMO_IF_EMPTY` | `1`; initializes only an empty database |
+| `SEED_DEMO_IF_EMPTY` | `0`; the preserved migration dataset supplies all records |
 | `SEED_DEMO_ON_STARTUP` | `0`; prevents password/data resets |
 | `LOG_LEVEL` | `INFO` |
+| `AI_MODEL` / `AI_API_KEY` | Provider-managed Question Studio model and credential; never embedded in the client |
 
 For a web-only deployment, `COOKIE_SAMESITE=lax` and an empty
 `CAPACITOR_ORIGINS` are sufficient. Add only exact HTTPS origins to
@@ -89,11 +93,11 @@ Pop-Location
 .\.venv\Scripts\python.exe scripts/migrate_sqlite_to_postgres.py --source backend/neurolearnx.db
 ```
 
-If the initial deployment already created demo rows, the copier refuses to
-overwrite them. After confirming a Render database backup, add `--replace` to
-replace only the NeuroLearn-X application tables. It copies relationships,
-authentication records, assessments, pathways, analytics, and embeds trained
-model artifacts in PostgreSQL. It then aligns PostgreSQL sequences.
+The copier refuses to write into a non-empty target. For the initial migration,
+use a new empty database so `--replace` is unnecessary. It copies relationships,
+authentication records, assessments, pathways, analytics, and embedded trained
+model artifacts, then aligns PostgreSQL sequences. Keep the transaction-safe
+SQLite checkpoint until the public count and relationship checks pass.
 
 ## Verification
 
@@ -103,8 +107,8 @@ Verify these public endpoints and flows:
 - `/api/health/live`: process liveness.
 - `/api/health/ready`: PostgreSQL query readiness.
 - `/`: direct real application homepage.
-- Student: `STEM001` / `LearnX!2026`.
-- Teacher: `TEACHER01` / `NeuroTeach!2026`.
+- Student: `STEM001` / the `PRODUCTION_DEMO_STUDENT_PASSWORD` secret.
+- Teacher: `TEACHER01` / the `PRODUCTION_TEACHER_PASSWORD` secret.
 
 Log in as both roles, create or update a record, redeploy the service, and
 confirm the record persists. Then test registration, assessment submission,

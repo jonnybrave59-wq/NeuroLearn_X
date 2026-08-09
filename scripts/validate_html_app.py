@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 
 
 PREFIX = "NeuroLearn-X-HTML-App/"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 REQUIRED = {
     "README-HTML-APP.md",
     "Start-NeuroLearn-X-HTML-App.bat",
@@ -69,7 +69,7 @@ def validate(path: Path) -> None:
 
         manifest = json.loads(archive.read(relative["package-manifest.json"]))
         if manifest.get("version") != VERSION or manifest.get("frontend_only") is not False:
-            raise RuntimeError("Manifest does not identify a full-stack 1.3.0 HTML App")
+            raise RuntimeError("Manifest does not identify a full-stack 1.3.1 HTML App")
         if manifest.get("application_route") != "/" or manifest.get("intermediate_page") is not False:
             raise RuntimeError("Manifest does not identify direct frontend serving from /")
 

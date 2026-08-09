@@ -37,6 +37,7 @@ import {
   apiUrl,
   inlineApiError,
   post,
+  patch,
   put,
   remove,
   reportNetworkFailure,
@@ -119,6 +120,9 @@ type UploadedDocument = {
   text_preview: string;
   analysis: {
     title: string;
+    module_title?: string;
+    detected_subject?: string;
+    detected_language?: string;
     headings: string[];
     main_topic: string;
     key_concepts: string[];
@@ -129,6 +133,14 @@ type UploadedDocument = {
     competencies: string[];
     relationships: string[];
     misconceptions: string[];
+    subtopics?: string[];
+    learning_objectives?: string[];
+    prerequisites?: string[];
+    estimated_learner_level?: string;
+    estimated_difficulty?: string;
+    pages_used_as_evidence?: number[];
+    unreadable_pages?: number[];
+    ocr_status?: string;
     method: string;
     limitations: string;
   };
@@ -166,6 +178,7 @@ const questionTypes = [
   "True or false",
   "Identification",
   "Short answer",
+  "Problem solving",
 ];
 const difficulties = ["Easy", "Moderate", "Challenging"];
 const cognitiveLevels = ["Remember", "Understand", "Apply", "Analyze"];
@@ -246,6 +259,7 @@ export function QuestionStudioPage() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [aiConfiguration, setAiConfiguration] = useState<{ configured: boolean; provider: string | null; model: string | null; message: string } | null>(null);
   const [publicationOpen, setPublicationOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [form, setForm] = useState({
@@ -262,6 +276,11 @@ export function QuestionStudioPage() {
     include_hints: true,
     include_prerequisites: true,
     include_calculations: false,
+    include_solutions: true,
+    concept_focus: [] as string[],
+    target_misconception: "",
+    language: "English",
+    source_grounding: true,
   });
 
   useEffect(() => {
@@ -269,11 +288,13 @@ export function QuestionStudioPage() {
       api<Concept[]>("/api/teacher/concepts?include_archived=false"),
       api<StudentOption[]>("/api/teacher/students"),
       api<MisconceptionOption[]>("/api/teacher/misconceptions"),
+      api<{ configured: boolean; provider: string | null; model: string | null; message: string }>("/api/teacher/ai/configuration"),
     ])
-      .then(([conceptRows, studentRows, misconceptionRows]) => {
+      .then(([conceptRows, studentRows, misconceptionRows, aiConfig]) => {
         setConcepts(conceptRows);
         setStudents(studentRows);
         setMisconceptions(misconceptionRows);
+        setAiConfiguration(aiConfig);
       })
       .catch((cause) => setError(messageOf(cause)));
   }, []);
@@ -446,7 +467,7 @@ export function QuestionStudioPage() {
       <PageHeader
         eyebrow="Material-grounded assessment authoring"
         title="Question Studio"
-        description="Local rule-based analysis grounds editable question drafts in the uploaded material. No external AI service is used; teacher review is required."
+        description="A configured server-side AI analyzes the actual module, generates source-grounded drafts, and performs a quality-review pass before teacher approval."
       />
       {error && <ErrorNotice message={error} onDismiss={() => setError("")} />}
       {notice && (
@@ -454,6 +475,7 @@ export function QuestionStudioPage() {
           {notice}
         </div>
       )}
+      {aiConfiguration && !aiConfiguration.configured && <ErrorNotice message={aiConfiguration.message} />}
 
       <section className="grid gap-6 xl:grid-cols-[0.82fr_1.18fr]">
         <div className="rounded-2xl bg-white p-6 shadow-soft">
@@ -533,6 +555,8 @@ export function QuestionStudioPage() {
                     </summary>
                     <div className="mt-3 space-y-3 text-xs leading-5 text-cyan-950">
                       <p><strong>Detected title:</strong> {document.analysis.title}</p>
+                      <p><strong>Detected subject and language:</strong> {document.analysis.detected_subject || "Teacher confirmation needed"} · {document.analysis.detected_language || "Unknown"}</p>
+                      <p><strong>Learner level and difficulty:</strong> {document.analysis.estimated_learner_level || "Not estimated"} · {document.analysis.estimated_difficulty || "Not estimated"}</p>
                       <p><strong>Key concepts:</strong> {document.analysis.key_concepts.join(", ") || "Teacher confirmation needed"}</p>
                       <p><strong>Headings:</strong> {document.analysis.headings.join(" · ") || "No explicit headings detected"}</p>
                       <div className="grid gap-3 sm:grid-cols-2">
@@ -544,6 +568,9 @@ export function QuestionStudioPage() {
                           ["Competencies", document.analysis.competencies],
                           ["Relationships", document.analysis.relationships],
                           ["Misconceptions", document.analysis.misconceptions],
+                          ["Subtopics", document.analysis.subtopics || []],
+                          ["Learning objectives", document.analysis.learning_objectives || []],
+                          ["Prerequisites", document.analysis.prerequisites || []],
                         ].map(([label, values]) => (
                           <div key={label as string} className="rounded-lg bg-white/70 p-3">
                             <strong>{label as string}</strong>
@@ -555,6 +582,8 @@ export function QuestionStudioPage() {
                         ))}
                       </div>
                       <p><strong>Method:</strong> {document.analysis.method}</p>
+                      <p><strong>Pages used as evidence:</strong> {document.analysis.pages_used_as_evidence?.join(", ") || "Section-based source"}</p>
+                      <p><strong>OCR/readability:</strong> {document.analysis.ocr_status || "Not reported"}{document.analysis.unreadable_pages?.length ? ` Unreadable pages: ${document.analysis.unreadable_pages.join(", ")}.` : ""}</p>
                       <p><strong>Limitations:</strong> {document.analysis.limitations}</p>
                     </div>
                   </details>
@@ -600,7 +629,7 @@ export function QuestionStudioPage() {
             </FormField>
             <FormField label="Question type">
               <select value={form.question_type} onChange={(event) => setForm({ ...form, question_type: event.target.value })}>
-                {questionTypes.map((type) => <option key={type}>{type}</option>)}
+                {[...questionTypes, "Mixed"].map((type) => <option key={type}>{type}</option>)}
               </select>
             </FormField>
           </div>
@@ -619,11 +648,22 @@ export function QuestionStudioPage() {
                   {cognitiveLevels.map((item) => <option key={item}>{item}</option>)}
                 </select>
               </FormField>
+              <FormField label="Concept focus">
+                <input value={form.concept_focus.join(", ")} onChange={(event) => setForm({ ...form, concept_focus: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) })} placeholder="e.g. slope, intercept" />
+              </FormField>
+              <FormField label="Target misconception">
+                <input value={form.target_misconception} onChange={(event) => setForm({ ...form, target_misconception: event.target.value })} placeholder="e.g. reversing the slope ratio" />
+              </FormField>
+              <FormField label="Language">
+                <select value={form.language} onChange={(event) => setForm({ ...form, language: event.target.value })}><option>English</option><option>Filipino</option></select>
+              </FormField>
               {[
                 ["include_explanations", "Include explanations"],
                 ["include_hints", "Include hints"],
                 ["include_prerequisites", "Include prerequisite-concept questions"],
                 ["include_calculations", "Include supported calculation questions"],
+                ["include_solutions", "Include complete scaffolded solutions"],
+                ["source_grounding", "Require page or section grounding"],
               ].map(([name, label]) => (
                 <label key={name} className="flex items-center gap-3 rounded-lg bg-slate-50 p-3 text-sm font-semibold text-slate-700">
                   <input type="checkbox" checked={form[name as keyof typeof form] as boolean} onChange={(event) => setForm({ ...form, [name]: event.target.checked })} className="accent-cyan-600" />
@@ -632,7 +672,27 @@ export function QuestionStudioPage() {
               ))}
             </div>
           </details>
-          <button disabled={!document || generating} className="btn-primary mt-5 w-full">
+          <details className="mt-4 rounded-xl border border-cyan-200 bg-cyan-50 p-4">
+            <summary className="cursor-pointer text-sm font-black text-cyan-950">What do these generation settings do?</summary>
+            <dl className="mt-4 grid gap-3 text-xs leading-5 text-cyan-950 sm:grid-cols-2">
+              {[
+                ["Number of questions", "Controls how many questions the AI will prepare.", "Example: 10 creates ten review drafts."],
+                ["Question type", "Chooses multiple-choice, true-or-false, short-answer, problem-solving, or mixed items.", "Example: Mixed varies the response format."],
+                ["Difficulty", "Controls the reasoning and number of steps required.", "Example: Challenging may require a multi-step calculation."],
+                ["Learning objective", "Defines what the learner should demonstrate.", "Example: Solve a linear equation and verify the solution."],
+                ["Concept focus", "Limits questions to selected concepts or subtopics.", "Example: slope, intercept."],
+                ["Cognitive demand", "Controls recall, understanding, application, or analysis.", "Example: Apply uses the rule in a new situation."],
+                ["Include solutions", "Generates complete teaching solutions and explanations.", "Example: show formula, substitution, and result."],
+                ["Target misconception", "Builds distractors or follow-up questions around a misunderstanding.", "Example: reversing numerator and denominator."],
+                ["Language", "Controls the language used in questions and explanations.", "Example: Filipino produces Filipino-language drafts."],
+                ["Source grounding", "Requires every generated question to cite supporting material.", "Example: Page 4 · Worked Example 2."],
+              ].map(([name, description, example]) => <div key={name} className="rounded-lg bg-white/80 p-3"><dt className="font-black">{name}</dt><dd>{description}<span className="mt-1 block text-cyan-700">{example}</span></dd></div>)}
+            </dl>
+          </details>
+          <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm leading-6 text-slate-700">
+            <strong>Generation summary:</strong> Generate {form.number_of_questions} {form.difficulty.toLowerCase()}-difficulty {form.subject || "subject"} questions about {form.topic || "the selected topic"} using the uploaded module{form.include_solutions ? ", including scaffolded solutions" : ""}{form.target_misconception ? ` and distractors addressing ${form.target_misconception}` : ""}.
+          </div>
+          <button disabled={!document || generating || !aiConfiguration?.configured} className="btn-primary mt-5 w-full">
             {generating ? <LoaderCircle className="animate-spin" size={17} /> : <Sparkles size={17} />}
             {generating ? "Generating draft questions…" : "Generate Draft Questions"}
           </button>
@@ -1214,6 +1274,8 @@ export function QuestionBankPage() {
   const [publicationOpen, setPublicationOpen] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [bulkEditing, setBulkEditing] = useState(false);
+  const [bulkForm, setBulkForm] = useState({ concept_id: "", difficulty: "", status: "", learning_competency: "", question_type: "", cognitive_level: "", misconception_id: "" });
 
   const load = useCallback(async () => {
     const params = new URLSearchParams({ page: String(page), page_size: "12" });
@@ -1245,6 +1307,96 @@ export function QuestionBankPage() {
     try {
       await put(`/api/teacher/question-bank/${editing.id}`, questionPayload(editing));
       setEditing(null); setNotice("Question updated."); await load();
+    } catch (cause) { setError(messageOf(cause)); }
+  }
+
+  async function deleteQuestion(question: BankQuestion) {
+    if (!window.confirm(`Permanently delete this question?\n\n"${question.prompt}"\n\nArchive and Delete are separate actions. This cannot be undone.`)) return;
+    setError("");
+    try {
+      await remove(`/api/teacher/question-bank/${question.id}`);
+      setNotice(`Question permanently deleted: ${question.prompt}`);
+      setSelected((current) => { const next = new Set(current); next.delete(question.id); return next; });
+      await load();
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409 && cause.message.includes("belongs to")) {
+        if (!window.confirm(`${cause.message}\n\nRemove it from the linked assessment(s) and permanently delete it?`)) return;
+        try {
+          await remove(`/api/teacher/question-bank/${question.id}?detach_from_assessments=true`);
+          setNotice(`Question removed from linked assessments and permanently deleted: ${question.prompt}`);
+          setSelected((current) => { const next = new Set(current); next.delete(question.id); return next; });
+          await load();
+          return;
+        } catch (retryCause) {
+          setError(messageOf(retryCause));
+          return;
+        }
+      }
+      setError(messageOf(cause));
+    }
+  }
+
+  async function bulkDeleteQuestions() {
+    const questions = Array.from(selected).map((id) => ({ id, prompt: `Question #${id}` }) as BankQuestion);
+    if (!questions.length) return;
+    const titles = questions.map((question) => `• ${question.prompt}`).join("\n");
+    if (!window.confirm(`Permanently delete ${questions.length} selected question(s)?\n\n${titles}\n\nThis cannot be undone.`)) return;
+    const query = questions.map((question) => `question_ids=${question.id}`).join("&");
+    try {
+      await remove(`/api/teacher/question-bank/bulk-delete?${query}`);
+      setNotice(`${questions.length} questions permanently deleted.`);
+      setSelected(new Set());
+      await load();
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409 && cause.message.includes("assessments")) {
+        if (!window.confirm(`${cause.message}\n\nRemove the selected questions from linked assessments and continue?`)) return;
+        try {
+          await remove(`/api/teacher/question-bank/bulk-delete?${query}&detach_from_assessments=true`);
+          setNotice(`${questions.length} questions removed from linked assessments and permanently deleted.`);
+          setSelected(new Set());
+          await load();
+          return;
+        } catch (retryCause) {
+          setError(messageOf(retryCause));
+          return;
+        }
+      }
+      setError(messageOf(cause));
+    }
+  }
+
+  async function selectAllFiltered() {
+    const params = new URLSearchParams({ ids_only: "true" });
+    Object.entries(filters).forEach(([key, value]) => value && params.set(key, value));
+    try {
+      const result = await api<{ ids: number[] }>(`/api/teacher/question-bank?${params}`);
+      setSelected(new Set(result.ids));
+      setNotice(`${result.ids.length} filtered questions selected.`);
+    } catch (cause) { setError(messageOf(cause)); }
+  }
+
+  async function bulkArchiveQuestions() {
+    if (!selected.size) return;
+    try {
+      await post("/api/teacher/question-bank/batch", { question_ids: Array.from(selected), action: "archive" });
+      setNotice(`${selected.size} selected questions archived.`);
+      setSelected(new Set());
+      await load();
+    } catch (cause) { setError(messageOf(cause)); }
+  }
+
+  async function saveBulkEdit() {
+    const changes: Record<string, string | number> = Object.fromEntries(Object.entries(bulkForm).filter(([, value]) => value !== ""));
+    if (!Object.keys(changes).length) { setError("Choose at least one shared field to update."); return; }
+    ["concept_id", "misconception_id"].forEach((key) => {
+      if (changes[key]) changes[key] = Number(changes[key]);
+    });
+    try {
+      await patch("/api/teacher/question-bank/bulk-edit", { question_ids: Array.from(selected), ...changes });
+      setNotice(`${selected.size} selected questions updated without changing their text, answers, or solutions.`);
+      setBulkEditing(false);
+      setBulkForm({ concept_id: "", difficulty: "", status: "", learning_competency: "", question_type: "", cognitive_level: "", misconception_id: "" });
+      await load();
     } catch (cause) { setError(messageOf(cause)); }
   }
 
@@ -1283,20 +1435,42 @@ export function QuestionBankPage() {
                   <button onClick={() => setEditing(question)} className="btn-secondary !px-3"><Pencil size={15} /> Edit</button>
                   <button onClick={() => action(question, "duplicate")} className="btn-secondary !px-3"><Copy size={15} /> Duplicate</button>
                   <button onClick={() => action(question, "archive")} className="btn-secondary !px-3 text-rose-700"><Archive size={15} /> Archive</button>
+                  <button onClick={() => deleteQuestion(question)} className="icon-button text-rose-700" aria-label={`Permanently delete ${question.prompt}`} title="Permanently delete question"><Trash2 size={16} /></button>
                 </div>
               </article>
             ))}
           </div>
           <div className="mt-5 flex flex-col gap-3 rounded-2xl bg-white p-4 shadow-soft sm:flex-row sm:items-center sm:justify-between">
             <div className="text-sm text-slate-500">{selected.size} selected · {data.total} total questions</div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button onClick={() => setSelected(new Set(data.items.map((item) => item.id)))} className="btn-secondary !px-3">Select current page</button>
+              <button onClick={selectAllFiltered} className="btn-secondary !px-3">Select all filtered</button>
+              <button disabled={!selected.size} onClick={() => setSelected(new Set())} className="btn-secondary !px-3">Clear</button>
+              <button disabled={!selected.size} onClick={() => setBulkEditing(true)} className="btn-secondary !px-3"><Pencil size={15} /> Bulk edit</button>
+              <button disabled={!selected.size} onClick={bulkArchiveQuestions} className="btn-secondary !px-3"><Archive size={15} /> Bulk archive</button>
               <button disabled={page <= 1} onClick={() => setPage((value) => value - 1)} className="btn-secondary !px-3"><ChevronLeft size={16} /></button>
               <span className="text-sm font-bold">Page {page} of {data.total_pages}</span>
               <button disabled={page >= data.total_pages} onClick={() => setPage((value) => value + 1)} className="btn-secondary !px-3"><ChevronRight size={16} /></button>
+              <button disabled={!selected.size} onClick={bulkDeleteQuestions} className="btn-secondary !px-3 text-rose-700"><Trash2 size={16} /> Delete selected</button>
               <button disabled={!selected.size} onClick={() => setPublicationOpen(true)} className="btn-primary"><Plus size={16} /> Add to Assessment</button>
             </div>
           </div>
         </>
+      )}
+      {bulkEditing && (
+        <Modal title={`Bulk edit ${selected.size} questions`} onClose={() => setBulkEditing(false)} wide>
+          <p className="mb-4 text-sm text-slate-500">Only shared metadata is changed. Question text, answers, and solutions remain untouched.</p>
+          <div className="grid gap-4 md:grid-cols-2">
+            <FormField label="Concept"><select value={bulkForm.concept_id} onChange={(event) => setBulkForm({ ...bulkForm, concept_id: event.target.value })}><option value="">Keep current concepts</option>{concepts.map((concept) => <option key={concept.id} value={concept.id}>{concept.name}</option>)}</select></FormField>
+            <FormField label="Difficulty"><select value={bulkForm.difficulty} onChange={(event) => setBulkForm({ ...bulkForm, difficulty: event.target.value })}><option value="">Keep current difficulty</option>{difficulties.map((value) => <option key={value}>{value}</option>)}</select></FormField>
+            <FormField label="Status"><select value={bulkForm.status} onChange={(event) => setBulkForm({ ...bulkForm, status: event.target.value })}><option value="">Keep current status</option><option>Draft</option><option>Ready</option><option>Published</option><option>Archived</option></select></FormField>
+            <FormField label="Question type"><select value={bulkForm.question_type} onChange={(event) => setBulkForm({ ...bulkForm, question_type: event.target.value })}><option value="">Keep current type</option>{questionTypes.map((value) => <option key={value}>{value}</option>)}</select></FormField>
+            <FormField label="Cognitive demand"><select value={bulkForm.cognitive_level} onChange={(event) => setBulkForm({ ...bulkForm, cognitive_level: event.target.value })}><option value="">Keep current demand</option>{cognitiveLevels.map((value) => <option key={value}>{value}</option>)}</select></FormField>
+            <FormField label="Misconception tag"><select value={bulkForm.misconception_id} onChange={(event) => setBulkForm({ ...bulkForm, misconception_id: event.target.value })}><option value="">Keep current tags</option>{misconceptions.map((value) => <option key={value.id} value={value.id}>{value.code} · {value.name}</option>)}</select></FormField>
+            <FormField label="Competency"><textarea value={bulkForm.learning_competency} onChange={(event) => setBulkForm({ ...bulkForm, learning_competency: event.target.value })} placeholder="Leave blank to preserve each question's competency" /></FormField>
+          </div>
+          <div className="mt-5 flex justify-end gap-3"><button onClick={() => setBulkEditing(false)} className="btn-secondary">Cancel</button><button onClick={saveBulkEdit} className="btn-primary"><Save size={16} /> Apply shared changes</button></div>
+        </Modal>
       )}
       {editing && (
         <Modal title="Edit question" onClose={() => setEditing(null)} wide>
@@ -1333,6 +1507,33 @@ export function AssessmentManagerPage() {
     }
   }
 
+  async function deleteAssessment(assessment: any) {
+    const learnerWarning = assessment.learner_record_count
+      ? `\n\nWARNING: ${assessment.learner_record_count} learner attempt record(s), including linked responses, mental-effort ratings, mastery evidence, and interaction logs, will also be permanently removed.`
+      : "";
+    if (!window.confirm(`Permanently delete assessment "${assessment.title}"?${learnerWarning}\n\nLinked source questions remain in the Question Bank. This cannot be undone.`)) return;
+    try {
+      await remove(`/api/teacher/assessments/${assessment.id}?confirm_learner_record_deletion=${assessment.learner_record_count ? "true" : "false"}`);
+      setNotice(`${assessment.title} was permanently deleted.`);
+      setError("");
+      await loadAssessments();
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409) {
+        if (!window.confirm(`${cause.message}\n\nContinue with permanent deletion?`)) return;
+        try {
+          await remove(`/api/teacher/assessments/${assessment.id}?confirm_learner_record_deletion=true`);
+          setNotice(`${assessment.title} and linked learner records were permanently deleted.`);
+          await loadAssessments();
+          return;
+        } catch (retryCause) {
+          setError(messageOf(retryCause));
+          return;
+        }
+      }
+      setError(messageOf(cause));
+    }
+  }
+
   return (
     <>
       <PageHeader eyebrow="Publication control" title="Assessments" description="Review draft, scheduled, published, closed, and archived assessments." />
@@ -1358,6 +1559,7 @@ export function AssessmentManagerPage() {
                 {assessment.status === "Published" && <button onClick={() => setAssessmentStatus(assessment, "Closed")} className="btn-secondary !px-3">Close</button>}
                 {assessment.status === "Closed" && <button onClick={() => setAssessmentStatus(assessment, "Published")} className="btn-secondary !px-3">Reopen</button>}
                 {assessment.status !== "Archived" && <button onClick={() => setAssessmentStatus(assessment, "Archived")} className="btn-secondary !px-3 text-rose-700"><Archive size={15} /> Archive</button>}
+                <button onClick={() => deleteAssessment(assessment)} className="icon-button text-rose-700" aria-label={`Permanently delete ${assessment.title}`} title="Permanently delete assessment"><Trash2 size={16} /></button>
               </div>
             </article>
           ))}

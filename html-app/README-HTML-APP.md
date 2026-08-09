@@ -1,4 +1,4 @@
-# NeuroLearn-X HTML App 1.3.0
+# NeuroLearn-X HTML App 1.3.1
 
 This package launches the existing compiled NeuroLearn-X HTML/PWA directly
 while preserving the complete NeuroLearn-X architecture.

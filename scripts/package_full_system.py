@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / "release"
 OUTPUT = RELEASE / "NeuroLearn-X-Full-System.zip"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 PREFIX = "NeuroLearn-X/"
 FIXED_TIME = (2026, 8, 5, 12, 0, 0)
 
@@ -49,6 +49,9 @@ def package_files() -> dict[str, bytes]:
     files["scripts/migrate_sqlite_to_postgres.py"] = (
         ROOT / "scripts" / "migrate_sqlite_to_postgres.py"
     ).read_bytes()
+    files["scripts/smoke_test_deployment.py"] = (
+        ROOT / "scripts" / "smoke_test_deployment.py"
+    ).read_bytes()
     files["render.yaml"] = (ROOT / "render.yaml").read_bytes()
     files["LICENSE.txt"] = (ROOT / "launcher" / "templates" / "LICENSE.txt").read_bytes()
 
@@ -62,7 +65,7 @@ def package_files() -> dict[str, bytes]:
         "database": {
             "local": "SQLite initialized by the setup script",
             "production": "PostgreSQL configured through DATABASE_URL",
-            "migrations": "Alembic 0001 through 0005",
+            "migrations": "Alembic 0001 through 0008",
         },
         "health_endpoint": "/api/health",
         "pwa": True,
@@ -85,14 +88,19 @@ def validate_inputs(files: dict[str, bytes]) -> None:
         "backend/app/main.py",
         "backend/app/seed_if_empty.py",
         "backend/app/tutoring.py",
+        "backend/app/production_accounts.py",
         "backend/alembic/versions/0004_intelligent_tutoring.py",
         "backend/alembic/versions/0005_model_artifact.py",
+        "backend/alembic/versions/0006_teacher_refinement_evidence.py",
+        "backend/alembic/versions/0007_learner_onboarding.py",
+        "backend/alembic/versions/0008_production_hardening.py",
         "backend/requirements.txt",
         "frontend/dist/index.html",
         "frontend/dist/manifest.webmanifest",
         "frontend/dist/sw.js",
         "scripts/validate_deployment.py",
         "scripts/migrate_sqlite_to_postgres.py",
+        "scripts/smoke_test_deployment.py",
         "render.yaml",
     }
     missing = sorted(required.difference(files))

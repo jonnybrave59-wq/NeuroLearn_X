@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
 import io
+import json
 import logging
 import os
 import random
 import re
 import secrets
 import time
+import uuid
 import zipfile
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -32,13 +35,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .algorithms import prerequisite_ancestors, topological_order, would_create_cycle
-from .database import Base, engine, get_db
-from .ml import predict_activity_load, train_ensemble
+from .algorithms import (
+    adaptive_pathway_score,
+    prerequisite_ancestors,
+    topological_order,
+    would_create_cycle,
+)
+from .database import Base, SessionLocal, engine, get_db
+from .ml import predict_activity_load, predict_student_cognitive_load, train_ensemble
 from .models import (
     Activity,
     ActivityConcept,
@@ -50,6 +58,7 @@ from .models import (
     AuditLog,
     Concept,
     ConsentRecord,
+    CognitiveLoadPrediction,
     ExpertEvaluation,
     InteractionLog,
     ItemResponse,
@@ -63,6 +72,7 @@ from .models import (
     ModelVersion,
     PathwayRecommendation,
     PathwayStep,
+    PathwayVersion,
     PrerequisiteEdge,
     Question,
     StudentProfile,
@@ -70,9 +80,15 @@ from .models import (
     User,
     TeacherIntervention,
     TutoringSession,
+    TutoringResponse,
+)
+from .onboarding import (
+    ONBOARDING_DIAGNOSTIC_ITEMS,
+    ensure_onboarding_diagnostic,
 )
 from .schemas import (
     ActivityInput,
+    ActivityBulkInput,
     AssessmentInput,
     AssessmentStatusInput,
     AttemptInput,
@@ -89,6 +105,7 @@ from .schemas import (
     PathwayPreviewInput,
     QuestionBankInput,
     QuestionBatchInput,
+    QuestionBulkEditInput,
     QuestionInput,
     ResetInput,
     SettingsInput,
@@ -204,12 +221,23 @@ if PRODUCTION:
 async def lifespan(_app: FastAPI):
     if os.getenv("CREATE_TABLES_ON_STARTUP", "1") == "1":
         Base.metadata.create_all(engine)
-    yield
+    with SessionLocal() as db:
+        diagnostic = ensure_onboarding_diagnostic(db)
+        if diagnostic is None:
+            logger.warning(
+                "The onboarding diagnostic could not be prepared because 30 eligible "
+                "multiple-choice diagnostic items are not available."
+            )
+    try:
+        yield
+    finally:
+        engine.dispose()
+        logger.info("Database connection pool closed during application shutdown")
 
 
 app = FastAPI(
     title="NeuroLearn-X API",
-    version="1.3.0",
+    version="1.3.1",
     description="Explainable adaptive learning research prototype.",
     lifespan=lifespan,
 )
@@ -222,15 +250,27 @@ app.add_middleware(
     allow_origins=list(ALLOWED_ORIGINS),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Accept", "Content-Type", "Origin", "X-Requested-With"],
+    allow_headers=[
+        "Accept",
+        "Content-Type",
+        "Origin",
+        "X-Requested-With",
+        "X-Request-ID",
+    ],
 )
 
 RATE_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
 
 
-def enforce_rate_limit(request: Request, scope: str, limit: int, window: int = 60):
+def enforce_rate_limit(
+    request: Request,
+    scope: str,
+    limit: int,
+    window: int = 60,
+    identity: str | None = None,
+):
     client = request.client.host if request.client else "unknown"
-    key = f"{scope}:{client}"
+    key = f"{scope}:{identity or client}"
     now = time.monotonic()
     bucket = RATE_BUCKETS[key]
     while bucket and bucket[0] <= now - window:
@@ -246,10 +286,28 @@ def enforce_rate_limit(request: Request, scope: str, limit: int, window: int = 6
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     started = time.monotonic()
+    supplied_request_id = (request.headers.get("x-request-id") or "").strip()
+    request_id = (
+        supplied_request_id
+        if re.fullmatch(r"[A-Za-z0-9._:-]{8,80}", supplied_request_id)
+        else uuid.uuid4().hex
+    )
+    request.state.request_id = request_id
     origin = (request.headers.get("origin") or "").rstrip("/")
     request_origin = normalized_origin(str(request.base_url))
     unsafe_method = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
-    if (
+    missing_authenticated_origin = (
+        PRODUCTION
+        and unsafe_method
+        and COOKIE_NAME in request.cookies
+        and not origin
+    )
+    if missing_authenticated_origin:
+        response = JSONResponse(
+            status_code=403,
+            content={"detail": "Authenticated changes require an approved origin"},
+        )
+    elif (
         unsafe_method
         and origin
         and origin != request_origin
@@ -285,7 +343,9 @@ async def security_headers(request: Request, call_next):
             samesite=COOKIE_SAMESITE,
         )
     response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Request-ID"] = request_id
     response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     response.headers["Permissions-Policy"] = (
         "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
     )
@@ -302,9 +362,13 @@ async def security_headers(request: Request, call_next):
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains"
         )
+    if request.url.path.startswith(("/api/auth/", "/api/student/", "/api/teacher/")):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
     elapsed_ms = (time.monotonic() - started) * 1000
     logger.info(
-        "%s %s -> %s %.1fms",
+        "request_id=%s %s %s -> %s %.1fms",
+        request_id,
         request.method,
         request.url.path,
         response.status_code,
@@ -316,7 +380,8 @@ async def security_headers(request: Request, call_next):
 @app.exception_handler(Exception)
 async def unhandled_exception(request: Request, error: Exception):
     logger.error(
-        "Unhandled server error on %s %s",
+        "request_id=%s unhandled server error on %s %s",
+        getattr(request.state, "request_id", "unknown"),
         request.method,
         request.url.path,
         exc_info=(type(error), error, error.__traceback__),
@@ -381,7 +446,31 @@ def activity_payload(
         "resource_url": activity.resource_url,
         "active": activity.active,
         "is_diagnostic": activity.is_diagnostic,
+        "is_onboarding_diagnostic": activity.is_onboarding_diagnostic,
         "concept_ids": concept_ids,
+        "dependencies": {
+            "assigned_students": db.scalar(
+                select(func.count(func.distinct(AssessmentAssignment.student_id)))
+                .join(Assessment, Assessment.id == AssessmentAssignment.assessment_id)
+                .where(Assessment.activity_id == activity.id)
+            ) or 0,
+            "attempts": db.scalar(
+                select(func.count(AssessmentAttempt.id)).where(
+                    AssessmentAttempt.activity_id == activity.id
+                )
+            ) or 0,
+            "results": db.scalar(
+                select(func.count(AssessmentAttempt.id)).where(
+                    AssessmentAttempt.activity_id == activity.id,
+                    AssessmentAttempt.submitted_at.is_not(None),
+                )
+            ) or 0,
+            "pathway_steps": db.scalar(
+                select(func.count(PathwayStep.id)).where(
+                    PathwayStep.activity_id == activity.id
+                )
+            ) or 0,
+        },
     }
     if include_questions:
         questions = list(
@@ -493,6 +582,7 @@ def question_bank_payload(db: Session, question: Question) -> dict[str, Any]:
         "prerequisite_concept_id": question.prerequisite_concept_id,
         "validation_status": question.validation_status,
         "validation_flags": question.validation_flags or [],
+        "generation_metadata": question.generation_metadata or {},
         "distractor_rationales": question.distractor_rationales or {},
         "is_calculation": question.is_calculation,
         "status": question.status,
@@ -525,7 +615,7 @@ def question_bank_payload(db: Session, question: Question) -> dict[str, Any]:
     }
 
 
-def validate_office_archive(data: bytes):
+def validate_office_archive(extension: str, data: bytes):
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             expanded = sum(item.file_size for item in archive.infolist())
@@ -533,6 +623,16 @@ def validate_office_archive(data: bytes):
                 raise HTTPException(
                     status_code=413,
                     detail="The expanded document is too large to process safely",
+                )
+            names = set(archive.namelist())
+            required_member = {
+                ".docx": "word/document.xml",
+                ".pptx": "ppt/presentation.xml",
+            }[extension]
+            if "[Content_Types].xml" not in names or required_member not in names:
+                raise HTTPException(
+                    status_code=422,
+                    detail="The office document signature does not match its file type",
                 )
     except zipfile.BadZipFile:
         raise HTTPException(status_code=422, detail="The office document is unreadable")
@@ -548,12 +648,17 @@ def extract_document_text(extension: str, data: bytes) -> str:
             reader = PdfReader(io.BytesIO(data))
             if len(reader.pages) > 250:
                 raise HTTPException(status_code=413, detail="PDF page limit exceeded")
-            text_value = "\n".join(
-                f"[Page {index}]\n{page.extract_text() or ''}"
-                for index, page in enumerate(reader.pages, start=1)
-            )
+            pages = []
+            for index, page in enumerate(reader.pages, start=1):
+                try:
+                    page_text = page.extract_text(extraction_mode="layout") or ""
+                except TypeError:
+                    page_text = page.extract_text() or ""
+                marker = "" if len(page_text.strip()) >= 20 else "\n[Unreadable page: OCR unavailable or no text layer]"
+                pages.append(f"[Page {index}]\n{page_text}{marker}")
+            text_value = "\n".join(pages)
         elif extension == ".docx":
-            validate_office_archive(data)
+            validate_office_archive(extension, data)
             from docx import Document
 
             document = Document(io.BytesIO(data))
@@ -566,7 +671,7 @@ def extract_document_text(extension: str, data: bytes) -> str:
                 paragraphs.append(f"{marker}{paragraph.text}")
             text_value = "\n".join(paragraphs)
         elif extension == ".pptx":
-            validate_office_archive(data)
+            validate_office_archive(extension, data)
             from pptx import Presentation
 
             presentation = Presentation(io.BytesIO(data))
@@ -687,18 +792,72 @@ def analyze_material(text_value: str) -> dict[str, Any]:
         for word, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
         if count >= 2
     ][:12]
+    normalized = " ".join(content_lines).casefold()
+    mathematics_terms = len(re.findall(
+        r"\b(equation|algebra|function|geometry|probability|calculate|formula|variable|slope|trigonometry|mathematics)\b|[=+\-*/]",
+        normalized,
+    ))
+    physics_terms = len(re.findall(
+        r"\b(force|motion|velocity|energy|momentum|newton|physics|acceleration|vector)\b",
+        normalized,
+    ))
+    subject = (
+        "Mathematics"
+        if mathematics_terms >= max(2, physics_terms)
+        else "Physics"
+        if physics_terms >= 2
+        else "General education"
+    )
+    filipino_markers = len(re.findall(r"\b(ang|mga|ng|sa|ay|para|mula|bilang)\b", normalized))
+    english_markers = len(re.findall(r"\b(the|and|of|to|is|for|with|from)\b", normalized))
+    language = "Filipino" if filipino_markers > english_markers else "English"
+    page_numbers = sorted({int(value) for value in re.findall(r"\[Page (\d+)\]", text_value)})
+    unreadable_pages = sorted({int(value) for value in re.findall(
+        r"\[Page (\d+)\]\s*\[Unreadable page:", text_value
+    )})
+    variable_names = sorted(set(re.findall(r"\b([A-Za-z])\s*=", " ".join(formulas))))
+    prerequisites = [
+        sentence for sentence in sentences
+        if re.search(r"\b(prerequisite|prior knowledge|before learning|requires?|recall)\b", sentence, re.I)
+    ][:8]
+    difficulty_score = min(5, 1 + len(formulas) // 3 + len(examples) // 4)
+    learner_level = (
+        "Advanced secondary or early tertiary"
+        if difficulty_score >= 4
+        else "Secondary"
+        if difficulty_score >= 2
+        else "Introductory"
+    )
     return {
         "title": title,
+        "module_title": title,
+        "detected_subject": subject,
+        "detected_language": language,
         "headings": list(dict.fromkeys(headings)),
         "main_topic": headings[0] if headings else title,
+        "main_topics": list(dict.fromkeys(headings[:5] or [title])),
+        "subtopics": list(dict.fromkeys(headings[1:12])),
         "key_concepts": key_concepts,
+        "important_concepts": key_concepts,
         "definitions": definitions,
         "facts": sentences[:10],
         "formulas": formulas,
         "worked_examples": examples,
         "competencies": competencies,
+        "learning_objectives": competencies,
         "relationships": relationships,
         "misconceptions": misconceptions,
+        "formula_variables": variable_names,
+        "prerequisites": prerequisites,
+        "estimated_learner_level": learner_level,
+        "estimated_difficulty": ["Introductory", "Moderate", "Advanced", "Advanced", "Advanced"][difficulty_score - 1],
+        "pages_used_as_evidence": page_numbers,
+        "unreadable_pages": unreadable_pages,
+        "ocr_status": (
+            "Some pages have no readable text layer; install an OCR provider to process them."
+            if unreadable_pages
+            else "Not required; all pages contained readable text."
+        ),
         "method": "Local deterministic text analysis; no external AI service was used.",
         "limitations": (
             "The analysis identifies explicit text patterns. Scanned images, implicit "
@@ -1016,6 +1175,174 @@ def validate_generated_question(
     return status_value, flags
 
 
+def ai_configuration() -> dict[str, Any]:
+    api_key = os.getenv("AI_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
+    provider = os.getenv("AI_PROVIDER", "").strip()
+    model = os.getenv("AI_MODEL", "").strip()
+    base_url = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")
+    configured = bool(api_key and model and provider)
+    return {
+        "configured": configured,
+        "provider": provider or None,
+        "model": model or None,
+        "base_url": base_url if configured else None,
+        "api_key": api_key,
+    }
+
+
+def request_ai_question_generation(
+    document: UploadedDocument,
+    payload: DocumentGenerationInput,
+    concepts: list[Concept],
+) -> dict[str, Any]:
+    configuration = ai_configuration()
+    if not configuration["configured"]:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "AI question generation is not configured. Set AI_PROVIDER, AI_MODEL, "
+                "and AI_API_KEY (or OPENAI_API_KEY) in the backend environment."
+            ),
+        )
+    if configuration["provider"] == "test-grounded" and configuration["model"] == "deterministic-test-double":
+        passages = source_passages(document.extracted_text)
+        questions = []
+        for index in range(payload.number_of_questions):
+            concept = concepts[index % len(concepts)]
+            requested_type = payload.question_type
+            question_type = (
+                ["Multiple choice", "True or false", "Short answer", "Problem solving"][index % 4]
+                if requested_type == "Mixed"
+                else requested_type
+            )
+            data = generated_material_question(
+                passages, index, question_type, concept, payload.topic, payload.include_calculations
+            )
+            questions.append({
+                "concept_id": concept.id,
+                "prompt": data["prompt"],
+                "question_type": question_type,
+                "correct_answer": data["correct_answer"],
+                "choices": data["choices"],
+                "explanation": f"The answer is supported by {data['source_locator']}.",
+                "hint": f"Review {data['source_locator']}.",
+                "solution_steps": data["solution_steps"],
+                "source_locator": data["source_locator"],
+                "learning_competency": payload.learning_competency,
+                "estimated_cognitive_demand": 0.5,
+                "distractor_rationales": data["distractor_rationales"],
+                "is_calculation": data["is_calculation"],
+                "validation": {key: True for key in (
+                    "answerable", "answer_correct", "solution_consistent", "formula_units_valid",
+                    "source_supported", "distractors_valid", "not_duplicate",
+                    "difficulty_followed", "no_unrelated_topic",
+                )},
+                "validation_notes": ["Teacher review required: test provider output."],
+            })
+        return {"analysis": document.analysis or {}, "questions": questions}
+    if APP_ENV == "production" and not configuration["base_url"].startswith("https://"):
+        raise HTTPException(
+            status_code=500,
+            detail="The AI provider must use HTTPS in production.",
+        )
+    settings = payload.model_dump()
+    concept_data = [
+        {"id": item.id, "code": item.code, "name": item.name, "description": item.description}
+        for item in concepts
+    ]
+    source_text = document.extracted_text[: int(os.getenv("AI_SOURCE_CHAR_LIMIT", "60000"))]
+    system_prompt = (
+        "You are an educational assessment author and verifier. Analyze only the supplied "
+        "learning material, then create original questions grounded in it. Return strict JSON. "
+        "Never introduce facts absent from the source. Verify answers, units, formulas, "
+        "distractors, difficulty, uniqueness, and solution consistency before returning."
+    )
+    user_prompt = {
+        "task": "Analyze the module and generate source-grounded questions with a quality-review pass.",
+        "settings": settings,
+        "allowed_concepts": concept_data,
+        "existing_structural_analysis": document.analysis or {},
+        "required_output": {
+            "analysis": {
+                "detected_subject": "string",
+                "module_title": "string",
+                "main_topics": ["string"],
+                "subtopics": ["string"],
+                "learning_objectives": ["string"],
+                "important_concepts": ["string"],
+                "definitions": ["string"],
+                "formulas": ["string"],
+                "formula_variables": ["string"],
+                "worked_examples": ["string"],
+                "prerequisites": ["string"],
+                "estimated_learner_level": "string",
+                "estimated_difficulty": "string",
+                "misconceptions": ["string"],
+                "pages_used_as_evidence": [1],
+            },
+            "questions": [{
+                "concept_id": "integer from allowed_concepts",
+                "prompt": "string",
+                "question_type": "Multiple choice, True or false, Identification, Short answer, or Problem solving",
+                "correct_answer": "string",
+                "choices": [{"text": "string", "is_correct": True}],
+                "explanation": "string",
+                "hint": "string",
+                "solution_steps": "scaffolded solution string",
+                "source_locator": "Page N or Page N - section",
+                "learning_competency": "string",
+                "estimated_cognitive_demand": 0.5,
+                "distractor_rationales": {"choice text": "rationale"},
+                "is_calculation": False,
+                "validation": {
+                    "answerable": True,
+                    "answer_correct": True,
+                    "solution_consistent": True,
+                    "formula_units_valid": True,
+                    "source_supported": True,
+                    "distractors_valid": True,
+                    "not_duplicate": True,
+                    "difficulty_followed": True,
+                    "no_unrelated_topic": True,
+                },
+                "validation_notes": ["string"],
+            }],
+        },
+        "learning_material": source_text,
+    }
+    try:
+        import httpx
+
+        response = httpx.post(
+            f"{configuration['base_url']}/chat/completions",
+            headers={"Authorization": f"Bearer {configuration['api_key']}"},
+            json={
+                "model": configuration["model"],
+                "temperature": 0.2,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
+                ],
+            },
+            timeout=float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "90")),
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        result = json.loads(content)
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.exception("AI question generation failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"The configured AI service could not generate validated questions: {type(error).__name__}",
+        )
+    if not isinstance(result, dict) or not isinstance(result.get("questions"), list):
+        raise HTTPException(status_code=502, detail="The AI service returned an invalid question payload")
+    return result
+
+
 def replace_question_choices(
     db: Session, question: Question, choices: list[Any]
 ) -> None:
@@ -1166,6 +1493,528 @@ def assessment_assigned_to_student(
     )
 
 
+def onboarding_payload(profile: StudentProfile | None) -> dict[str, Any]:
+    completed_at = profile.onboarding_completed_at if profile else None
+    return {
+        "completed": completed_at is not None,
+        "completed_at": completed_at,
+        "version": profile.onboarding_version if profile else "1.0",
+    }
+
+
+def onboarding_diagnostic_payload(db: Session, student: User) -> dict[str, Any]:
+    activity = db.scalar(
+        select(Activity).where(
+            Activity.is_onboarding_diagnostic.is_(True),
+            Activity.active.is_(True),
+        )
+    )
+    if not activity:
+        return {
+            "available": False,
+            "item_count": 0,
+            "completed": False,
+            "analysis_complete": False,
+        }
+    item_count = db.scalar(
+        select(func.count(Question.id)).where(
+            Question.activity_id == activity.id,
+            Question.active.is_(True),
+            func.lower(Question.question_type) == "multiple choice",
+        )
+    ) or 0
+    attempt = db.scalar(
+        select(AssessmentAttempt)
+        .where(
+            AssessmentAttempt.student_id == student.id,
+            AssessmentAttempt.activity_id == activity.id,
+        )
+        .order_by(AssessmentAttempt.submitted_at.desc())
+    )
+    effort = (
+        db.scalar(
+            select(MentalEffortRating).where(
+                MentalEffortRating.attempt_id == attempt.id
+            )
+        )
+        if attempt
+        else None
+    )
+    gaps = list(
+        db.execute(
+            select(LearningGap, Concept)
+            .join(Concept, Concept.id == LearningGap.concept_id)
+            .where(
+                LearningGap.student_id == student.id,
+                LearningGap.resolved_at.is_(None),
+            )
+            .order_by(LearningGap.mastery_score, Concept.name)
+            .limit(4)
+        )
+    )
+    return {
+        "available": item_count == ONBOARDING_DIAGNOSTIC_ITEMS,
+        "activity_id": activity.id,
+        "title": activity.title,
+        "item_count": item_count,
+        "completed": attempt is not None,
+        "analysis_complete": effort is not None,
+        "pending_mental_effort_attempt_id": attempt.id if attempt and not effort else None,
+        "mental_effort_boundaries": {
+            "low_max": int(get_setting(db, "mental_effort_low_max")),
+            "moderate_max": int(get_setting(db, "mental_effort_moderate_max")),
+        },
+        "latest_result": (
+            {
+                "attempt_id": attempt.id,
+                "score": attempt.score,
+                "max_score": attempt.max_score,
+                "accuracy": attempt.accuracy,
+                "submitted_at": attempt.submitted_at,
+                "mental_effort": effort.rating if effort else None,
+                "cognitive_load_category": effort.category if effort else "Pending",
+            }
+            if attempt
+            else None
+        ),
+        "priority_gaps": [
+            {
+                "concept_id": concept.id,
+                "concept": concept.name,
+                "mastery_score": gap.mastery_score,
+            }
+            for gap, concept in gaps
+        ],
+    }
+
+
+def dashboard_explainability(
+    db: Session,
+    student: User,
+    profile: StudentProfile | None,
+    mastery: dict[int, MasteryRecord],
+    gaps: list[LearningGap],
+    pathway: PathwayRecommendation | None,
+    pathway_data: dict[str, Any] | None,
+) -> dict[str, Any]:
+    threshold = float(get_setting(db, "mastery_threshold"))
+    mastery_rows = sorted(
+        mastery.values(), key=lambda record: (db.get(Concept, record.concept_id).name, record.id)
+    )
+    concept_evidence: list[dict[str, Any]] = []
+    for record in mastery_rows:
+        concept = db.get(Concept, record.concept_id)
+        evidence_rows = db.execute(
+            select(
+                AssessmentAttempt.id,
+                AssessmentAttempt.submitted_at,
+                func.sum(ItemResponse.earned_points),
+                func.sum(ItemResponse.max_points),
+            )
+            .join(ItemResponse, ItemResponse.attempt_id == AssessmentAttempt.id)
+            .join(Question, Question.id == ItemResponse.question_id)
+            .where(
+                AssessmentAttempt.student_id == student.id,
+                Question.concept_id == record.concept_id,
+            )
+            .group_by(AssessmentAttempt.id, AssessmentAttempt.submitted_at)
+            .order_by(AssessmentAttempt.submitted_at)
+        ).all()
+        attempts = []
+        for position, (attempt_id, submitted_at, earned, maximum) in enumerate(
+            evidence_rows, start=1
+        ):
+            earned_value = float(earned or 0)
+            maximum_value = float(maximum or 0)
+            attempts.append(
+                {
+                    "attempt_id": attempt_id,
+                    "earned": earned_value,
+                    "maximum": maximum_value,
+                    "mastery": earned_value / maximum_value if maximum_value else None,
+                    "weight": position if record.calculation_mode == "weighted" else None,
+                    "submitted_at": submitted_at,
+                }
+            )
+        concept_evidence.append(
+            {
+                "concept_id": concept.id,
+                "concept": concept.name,
+                "score": record.mastery_score,
+                "classification": record.classification,
+                "calculation_mode": record.calculation_mode,
+                "attempts": attempts,
+                "latest_evidence_at": record.created_at,
+                "below_threshold": record.mastery_score < threshold,
+            }
+        )
+    mastery_average = (
+        sum(record.mastery_score for record in mastery_rows) / len(mastery_rows)
+        if mastery_rows
+        else None
+    )
+    below_threshold = [row for row in concept_evidence if row["below_threshold"]]
+    score_breakdown_count = sum(bool(row["attempts"]) for row in concept_evidence)
+    latest_mastery_at = max(
+        (record.created_at for record in mastery_rows), default=None
+    )
+    if mastery_average is None:
+        mastery_interpretation = (
+            "NeuroLearn-X needs more completed learning activities before it can "
+            "calculate this reliably."
+        )
+    elif mastery_average >= threshold:
+        mastery_interpretation = (
+            f"Your Average Mastery is {mastery_average:.0%}. Your assessed concepts "
+            "show strong current evidence overall; individual concepts are still checked separately."
+        )
+    elif mastery_average >= threshold * 0.7:
+        mastery_interpretation = (
+            f"Your Average Mastery is {mastery_average:.0%}. You are showing partial "
+            "understanding, and some concepts still need practice."
+        )
+    else:
+        mastery_interpretation = (
+            f"Your Average Mastery is {mastery_average:.0%}. NeuroLearn-X will provide "
+            "more guided prerequisite practice while you build stronger evidence."
+        )
+
+    latest_interaction = db.scalar(
+        select(InteractionLog)
+        .where(InteractionLog.student_id == student.id)
+        .order_by(InteractionLog.submission_time.desc())
+    )
+    prediction = db.scalar(
+        select(CognitiveLoadPrediction)
+        .where(CognitiveLoadPrediction.student_id == student.id)
+        .order_by(CognitiveLoadPrediction.evidence_date.desc(), CognitiveLoadPrediction.id.desc())
+    )
+    latest_effort = db.scalar(
+        select(MentalEffortRating)
+        .where(MentalEffortRating.student_id == student.id)
+        .order_by(MentalEffortRating.created_at.desc())
+    )
+    prediction_is_current = bool(
+        prediction
+        and (
+            latest_interaction is None
+            or utc_value(prediction.evidence_date) >= utc_value(latest_interaction.submission_time)
+        )
+    )
+    prediction_version = db.get(ModelVersion, prediction.model_version_id) if prediction else None
+    probabilities = prediction.probabilities if prediction_is_current and prediction else {}
+    model_count = len(
+        (prediction_version.metadata_json or {}).get("ensemble_members", [])
+    ) if prediction_version else 0
+    if prediction_is_current and prediction:
+        load_interpretation = (
+            f"Your model-predicted cognitive load is {prediction.predicted_category}. "
+            + {
+                "Low": "NeuroLearn-X can offer efficient review or an optional challenge while monitoring mastery.",
+                "Moderate": "NeuroLearn-X will provide guided support while keeping the activity challenging enough for learning.",
+                "High": "NeuroLearn-X will favor shorter steps and stronger scaffolding before increasing difficulty.",
+            }.get(prediction.predicted_category, "NeuroLearn-X will continue monitoring your learning evidence.")
+        )
+        prediction_quality = (
+            "All required model outputs are available."
+            if not prediction.missing_features
+            else "The prediction is available, but some optional evidence was missing: "
+            + ", ".join(str(item).replace("_", " ") for item in prediction.missing_features)
+            + "."
+        )
+    else:
+        load_interpretation = (
+            "NeuroLearn-X needs more completed learning activities before it can "
+            "calculate this reliably."
+        )
+        prediction_quality = (
+            "A newer completed activity exists, so the older model prediction is not displayed."
+            if prediction and latest_interaction
+            else "No current learner-level ensemble prediction has been recorded."
+        )
+
+    target = db.get(Concept, profile.target_concept_id) if profile and profile.target_concept_id else None
+    target_mastery = mastery.get(target.id) if target else None
+    target_gap = next((gap for gap in gaps if target and gap.concept_id == target.id), None)
+    prerequisite_rows = (
+        list(
+            db.execute(
+                select(Concept)
+                .join(
+                    PrerequisiteEdge,
+                    PrerequisiteEdge.prerequisite_concept_id == Concept.id,
+                )
+                .where(
+                    PrerequisiteEdge.succeeding_concept_id == target.id,
+                    PrerequisiteEdge.active.is_(True),
+                )
+                .order_by(Concept.difficulty, Concept.name)
+            ).scalars()
+        )
+        if target
+        else []
+    )
+    target_prerequisites = [
+        {
+            "concept_id": concept.id,
+            "concept": concept.name,
+            "mastery": mastery[concept.id].mastery_score if concept.id in mastery else None,
+            "below_threshold": (
+                concept.id not in mastery or mastery[concept.id].mastery_score < threshold
+            ),
+        }
+        for concept in prerequisite_rows
+    ]
+    target_reason = None
+    if target:
+        if target_gap and target_mastery:
+            target_reason = (
+                f"{target.name} is the active target because its current mastery is "
+                f"{target_mastery.mastery_score:.0%}, below the configured {threshold:.0%} threshold."
+            )
+        elif target_mastery:
+            target_reason = (
+                f"{target.name} is the active focus saved in your learner profile. Its current "
+                f"mastery is {target_mastery.mastery_score:.0%}; the pathway still checks connected prerequisites."
+            )
+        else:
+            target_reason = (
+                f"{target.name} is the active focus saved in your learner profile, but no valid "
+                "mastery evidence has been recorded for it yet."
+            )
+
+    required_steps = [step for step in (pathway_data or {}).get("steps", []) if step["required"]]
+    completed_steps = [step for step in required_steps if step["completed_at"]]
+    remaining_steps = [step for step in required_steps if not step["completed_at"]]
+    progress_percent = (
+        len(completed_steps) / len(required_steps) if required_steps else None
+    )
+    latest_progress_at = max(
+        [step["completed_at"] for step in completed_steps]
+        + ([pathway.created_at] if pathway else []),
+        default=None,
+    )
+    next_step = remaining_steps[0] if remaining_steps else None
+    next_concept = db.get(Concept, next_step["concept_id"]) if next_step else None
+    next_gap = next(
+        (gap for gap in gaps if next_step and gap.concept_id == next_step["concept_id"]),
+        None,
+    )
+    next_prerequisites = []
+    if next_concept:
+        next_prerequisites = [
+            concept.name
+            for concept in db.execute(
+                select(Concept)
+                .join(
+                    PrerequisiteEdge,
+                    PrerequisiteEdge.prerequisite_concept_id == Concept.id,
+                )
+                .where(
+                    PrerequisiteEdge.succeeding_concept_id == next_concept.id,
+                    PrerequisiteEdge.active.is_(True),
+                )
+                .order_by(Concept.name)
+            ).scalars()
+        ]
+    decision = (pathway.decision_explanation or {}) if pathway else {}
+    weights = decision.get("weights") or {
+        "alpha": float(get_setting(db, "alpha")),
+        "beta": float(get_setting(db, "beta")),
+        "gamma": float(get_setting(db, "gamma")),
+    }
+    aps_available = bool(
+        pathway
+        and pathway.source_type == "Automatic"
+        and decision.get("adaptive_pathway_score") is not None
+    )
+    difficulty_labels = {1: "Foundational", 2: "Developing", 3: "Moderate", 4: "Advanced", 5: "Challenging"}
+    next_activity = db.get(Activity, next_step["activity_id"]) if next_step else None
+
+    return {
+        "mastery_threshold": threshold,
+        "average_mastery": {
+            "available": mastery_average is not None,
+            "value": mastery_average,
+            "meaning": "Average Mastery shows how well you currently understand the concepts measured by your completed assessments and learning activities.",
+            "why_matters": "It summarizes current concept evidence while keeping each concept's mastery result separate.",
+            "interpretation": mastery_interpretation,
+            "concepts": concept_evidence,
+            "concepts_below_threshold": below_threshold,
+            "sum_mastery": sum(record.mastery_score for record in mastery_rows),
+            "concept_count": len(mastery_rows),
+            "score_breakdown_count": score_breakdown_count,
+            "threshold": threshold,
+            "latest_evidence_at": latest_mastery_at,
+            "pathway_effect": (
+                f"{len(below_threshold)} concept(s) are below the {threshold:.0%} threshold and may be prioritized as learning gaps."
+                if mastery_rows
+                else "No mastery value is sent to the pathway until valid assessment evidence exists."
+            ),
+            "data_quality": (
+                f"Calculated from {len(mastery_rows)} concept(s) with valid saved mastery evidence. "
+                + (
+                    "Item-score breakdowns are available for every concept."
+                    if score_breakdown_count == len(mastery_rows)
+                    else f"Item-score breakdowns are available for {score_breakdown_count}; the remaining {len(mastery_rows) - score_breakdown_count} use their saved mastery records because older item-level provenance is unavailable."
+                )
+                if mastery_rows
+                else "NeuroLearn-X needs more completed learning activities before it can calculate this reliably."
+            ),
+            "related_path": "/student/mastery",
+        },
+        "model_predicted_cognitive_load": {
+            "available": prediction_is_current,
+            "category": prediction.predicted_category if prediction_is_current and prediction else None,
+            "probabilities": probabilities,
+            "index": prediction.expected_index if prediction_is_current and prediction else None,
+            "confidence": prediction.confidence if prediction_is_current and prediction else None,
+            "model_version": prediction_version.version if prediction_is_current and prediction_version else None,
+            "model_count": model_count,
+            "meaning": "Predicted Cognitive Load estimates how mentally demanding your recent learning activities may have been based on your performance and behavior.",
+            "why_matters": "It helps NeuroLearn-X choose an appropriate amount of scaffolding without treating effort as ability.",
+            "interpretation": load_interpretation,
+            "evidence": prediction.evidence if prediction_is_current and prediction else None,
+            "reported_mental_effort": (
+                {
+                    "rating": latest_effort.rating,
+                    "category": latest_effort.category,
+                    "reported_at": latest_effort.created_at,
+                }
+                if latest_effort
+                else None
+            ),
+            "latest_evidence_at": prediction.evidence_date if prediction_is_current and prediction else None,
+            "pathway_effect": (
+                prediction.recommended_action
+                if prediction_is_current and prediction
+                else "No model-predicted load is applied as a learner-level dashboard result until a current prediction is available."
+            ),
+            "data_quality": prediction_quality,
+            "disclaimer": "This is an educational model prediction for learning support, not a medical or psychological diagnosis.",
+            "related_path": "/student/history",
+        },
+        "current_target": {
+            "available": target is not None,
+            "concept": concept_payload(target) if target else None,
+            "mastery": target_mastery.mastery_score if target_mastery else None,
+            "threshold": threshold,
+            "detected_gap": target_gap is not None,
+            "gap_amount": (
+                max(0.0, threshold - target_mastery.mastery_score)
+                if target_mastery and target_gap
+                else None
+            ),
+            "prerequisites": target_prerequisites,
+            "reason": target_reason,
+            "meaning": "Current Target is the concept NeuroLearn-X recommends that you focus on now.",
+            "why_matters": "A clear target keeps the pathway focused on the knowledge needed for your next goal.",
+            "interpretation": target_reason or "Choose a General Physics target to begin personalized recommendations.",
+            "latest_evidence_at": target_mastery.created_at if target_mastery else None,
+            "pathway_effect": (
+                "The active pathway follows the prerequisite graph toward this target and prioritizes unmastered connected concepts."
+                if target
+                else "A pathway cannot be generated until a target competency is selected."
+            ),
+            "data_quality": (
+                "Target and mastery values come from the learner profile and latest valid mastery record."
+                if target and target_mastery
+                else "The target is available, but more completed learning activities are needed for a reliable mastery comparison."
+                if target
+                else "No target competency is currently selected."
+            ),
+            "related_path": "/student/targets",
+        },
+        "pathway_progress": {
+            "available": bool(pathway and required_steps),
+            "completed": len(completed_steps),
+            "total": len(required_steps),
+            "remaining": len(remaining_steps),
+            "percentage": progress_percent,
+            "current_activity": next_step["activity"] if next_step else None,
+            "steps": [
+                {
+                    "activity": step["activity"],
+                    "concept": step["concept"],
+                    "status": "Completed" if step["completed_at"] else "Current" if next_step and step["id"] == next_step["id"] else "Remaining",
+                    "completed_at": step["completed_at"],
+                }
+                for step in required_steps
+            ],
+            "meaning": "Pathway Progress shows how much of your current personalized learning pathway you have successfully completed.",
+            "why_matters": "It shows completed evidence and what remains without counting an activity before its completion requirement is met.",
+            "interpretation": (
+                f"You completed {len(completed_steps)} of {len(required_steps)} required activities, so your Pathway Progress is {progress_percent:.1%}. {len(remaining_steps)} activit{'y' if len(remaining_steps) == 1 else 'ies'} remain."
+                if progress_percent is not None
+                else "NeuroLearn-X needs an active pathway with required activities before progress can be calculated."
+            ),
+            "latest_evidence_at": latest_progress_at,
+            "pathway_effect": "The pathway may update when new results reveal a learning gap, a concept reaches mastery, or predicted cognitive load changes.",
+            "data_quality": (
+                "Only required steps with saved completion evidence are counted as completed."
+                if required_steps
+                else "NeuroLearn-X needs more completed learning activities before it can calculate this reliably."
+            ),
+            "related_path": "/student/pathway",
+        },
+        "next_recommended_step": {
+            "available": next_step is not None,
+            "activity": next_step["activity"] if next_step else None,
+            "concept": next_step["concept"] if next_step else None,
+            "learning_gap": (
+                {
+                    "concept": next_concept.name,
+                    "mastery": next_gap.mastery_score,
+                    "threshold": next_gap.threshold,
+                }
+                if next_gap and next_concept
+                else None
+            ),
+            "prerequisites": next_prerequisites,
+            "estimated_minutes": next_step["estimated_minutes"] if next_step else None,
+            "difficulty": difficulty_labels.get(next_activity.difficulty, f"Level {next_activity.difficulty}") if next_activity else None,
+            "predicted_load_index": next_step["predicted_load_index"] if next_step else None,
+            "selection_reason": next_step["selection_reason"] if next_step else None,
+            "meaning": "Next Recommended Step is the activity NeuroLearn-X considers most suitable for your current learning needs.",
+            "why_matters": "It turns current mastery, prerequisite, load, and time evidence into one clear next action.",
+            "interpretation": (
+                next_step["selection_reason"]
+                if next_step
+                else "No required activity is currently waiting in the active pathway."
+            ),
+            "aps": (
+                {
+                    "available": True,
+                    "gap_coverage": pathway.gap_coverage,
+                    "predicted_cognitive_load": pathway.predicted_cognitive_load,
+                    "normalized_learning_time": pathway.normalized_learning_time,
+                    "score": pathway.adaptive_pathway_score,
+                    "weights": weights,
+                    "alternatives": decision.get("alternatives_not_selected", []),
+                    "selection_reason": decision.get("selection_reason"),
+                }
+                if aps_available and pathway
+                else {
+                    "available": False,
+                    "reason": (
+                        "This is a teacher-assigned pathway, so an Adaptive Pathway Score was not used to override the teacher's selection."
+                        if pathway and pathway.source_type == "Teacher"
+                        else "No valid automatic pathway candidate comparison is available."
+                    ),
+                }
+            ),
+            "latest_evidence_at": pathway.created_at if pathway else None,
+            "pathway_effect": "Completing this activity with the existing evidence requirement can update mastery, resolve or add gaps, and recalculate the remaining route.",
+            "data_quality": (
+                "Recommendation fields come from the current required pathway step and its saved selection evidence."
+                if next_step
+                else "NeuroLearn-X needs an active pathway before it can recommend a next step."
+            ),
+            "related_path": "/student/pathway",
+        },
+    }
+
+
 def student_snapshot(db: Session, student: User) -> dict[str, Any]:
     mastery = latest_mastery_map(db, student.id)
     concepts = {row.id: row for row in db.scalars(select(Concept))}
@@ -1239,11 +2088,26 @@ def student_snapshot(db: Session, student: User) -> dict[str, Any]:
             .limit(12)
         )
     ]
-    completed = (
-        sum(1 for step in pathway_data["steps"] if step["completed_at"]) if pathway_data else 0
+    required_steps = (
+        [step for step in pathway_data["steps"] if step["required"]]
+        if pathway_data
+        else []
     )
-    total = len(pathway_data["steps"]) if pathway_data else 0
+    completed = sum(1 for step in required_steps if step["completed_at"])
+    total = len(required_steps)
+    explainability = dashboard_explainability(
+        db,
+        student,
+        profile,
+        mastery,
+        gaps,
+        pathway,
+        pathway_data,
+    )
     return {
+        "onboarding": onboarding_payload(profile),
+        "diagnostic": onboarding_diagnostic_payload(db, student),
+        "explainability": explainability,
         "student": {
             **user_payload(student),
             "grade_level": profile.grade_level if profile else None,
@@ -1327,6 +2191,63 @@ def student_snapshot(db: Session, student: User) -> dict[str, Any]:
     }
 
 
+@app.get("/api/teacher/students/{student_id}/reported-cognitive-load")
+def reported_cognitive_load(
+    student_id: int,
+    db: Session = Depends(get_db),
+    _teacher: User = Depends(require_role("teacher")),
+):
+    student = db.get(User, student_id)
+    if not student or student.role != "student":
+        raise HTTPException(status_code=404, detail="Student not found")
+    ratings = list(
+        db.scalars(
+            select(MentalEffortRating)
+            .where(MentalEffortRating.student_id == student.id)
+            .order_by(MentalEffortRating.created_at.desc())
+        )
+    )
+    average = (
+        sum(row.rating for row in ratings) / len(ratings) if ratings else None
+    )
+    low_max = int(get_setting(db, "mental_effort_low_max"))
+    moderate_max = int(get_setting(db, "mental_effort_moderate_max"))
+    average_category = (
+        None
+        if average is None
+        else "Low"
+        if average <= low_max
+        else "Moderate"
+        if average <= moderate_max
+        else "High"
+    )
+    history = []
+    for row in ratings:
+        attempt = db.get(AssessmentAttempt, row.attempt_id)
+        activity = db.get(Activity, attempt.activity_id) if attempt else None
+        history.append(
+            {
+                "id": row.id,
+                "rating": row.rating,
+                "category": row.category,
+                "activity": activity.title if activity else "Unavailable activity",
+                "activity_id": activity.id if activity else None,
+                "attempt_id": row.attempt_id,
+                "date": row.created_at,
+            }
+        )
+    return {
+        "student_id": student.id,
+        "participant_code": student.participant_code,
+        "display_name": student.display_name,
+        "average_rating": average,
+        "average_category": average_category,
+        "history": history,
+        "message": None if history else "No reported cognitive-load data yet.",
+        "measure": "Self-reported 1-9 mental-effort rating",
+    }
+
+
 def disable_health_caching(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
@@ -1340,7 +2261,7 @@ def health(response: Response):
         "status": "ok",
         "service": "NeuroLearn-X API",
         "name": "NeuroLearn-X",
-        "version": "1.3.0",
+        "version": "1.3.1",
         "mode": "research prototype",
     }
 
@@ -1376,8 +2297,8 @@ def release_download(filename: str):
         "NeuroLearn-X-Source-v1.2.0.zip.sha256",
         "NeuroLearn-X-Source-v1.2.1.zip",
         "NeuroLearn-X-Source-v1.2.1.zip.sha256",
-        "NeuroLearn-X-Source-v1.3.0.zip",
-        "NeuroLearn-X-Source-v1.3.0.zip.sha256",
+        "NeuroLearn-X-Source-v1.3.1.zip",
+        "NeuroLearn-X-Source-v1.3.1.zip.sha256",
         "NeuroLearn-X-Full-System.zip",
         "NeuroLearn-X-Full-System.zip.sha256",
         "NeuroLearn-X-Source-Code.zip",
@@ -1476,7 +2397,7 @@ def register_student(
     db.commit()
     db.refresh(user)
     return {
-        "message": "Student account created successfully. You can now sign in.",
+        "message": "Student account created successfully.",
         "student": user_payload(user),
     }
 
@@ -1523,8 +2444,16 @@ def login(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    enforce_rate_limit(request, "login", 30)
     identifier = payload.participant_code.strip()
+    identity_digest = hashlib.sha256(identifier.casefold().encode()).hexdigest()[:16]
+    enforce_rate_limit(request, "login-ip", 30, 300)
+    enforce_rate_limit(
+        request,
+        "login-identity",
+        10,
+        300,
+        identity=identity_digest,
+    )
     user = db.scalar(
         select(User).where(
             or_(
@@ -1612,6 +2541,56 @@ def student_dashboard(
     return student_snapshot(db, student)
 
 
+@app.get("/api/student/onboarding")
+def student_onboarding(
+    db: Session = Depends(get_db), student: User = Depends(require_role("student"))
+):
+    profile = db.scalar(
+        select(StudentProfile).where(StudentProfile.user_id == student.id)
+    )
+    if not profile:
+        raise HTTPException(status_code=404, detail="Student profile not found")
+    return onboarding_payload(profile)
+
+
+@app.post("/api/student/onboarding/complete")
+def complete_student_onboarding(
+    db: Session = Depends(get_db), student: User = Depends(require_role("student"))
+):
+    profile = db.scalar(
+        select(StudentProfile).where(StudentProfile.user_id == student.id)
+    )
+    if not profile:
+        raise HTTPException(status_code=404, detail="Student profile not found")
+    if profile.onboarding_completed_at is None:
+        profile.onboarding_completed_at = datetime.now(timezone.utc)
+        profile.onboarding_version = "1.0"
+        audit(
+            db,
+            student.id,
+            "student.onboarding.completed",
+            "student_profile",
+            profile.id,
+            {"version": profile.onboarding_version},
+        )
+        db.commit()
+        db.refresh(profile)
+    return onboarding_payload(profile)
+
+
+@app.get("/api/student/onboarding-diagnostic")
+def student_onboarding_diagnostic(
+    db: Session = Depends(get_db), student: User = Depends(require_role("student"))
+):
+    status_payload = onboarding_diagnostic_payload(db, student)
+    if not status_payload["available"]:
+        raise HTTPException(
+            status_code=503,
+            detail="The 30-item diagnostic assessment is not available",
+        )
+    return status_payload
+
+
 @app.get("/api/student/targets")
 def target_competencies(
     db: Session = Depends(get_db), _student: User = Depends(require_role("student"))
@@ -1647,6 +2626,7 @@ def choose_target(
         .where(
             ActivityConcept.concept_id == concept.id,
             Activity.is_diagnostic.is_(True),
+            Activity.is_onboarding_diagnostic.is_(False),
             Activity.active.is_(True),
         )
     )
@@ -1687,6 +2667,8 @@ def student_activity(
     payload["time_limit_seconds"] = (
         assessment.time_limit * 60
         if assessment and assessment.time_limit
+        else activity.estimated_minutes * 60
+        if activity.is_onboarding_diagnostic
         else 5 * 60
     )
     if assessment:
@@ -1836,6 +2818,7 @@ def student_diagnostic(
         .where(
             ActivityConcept.concept_id == concept_id,
             Activity.is_diagnostic.is_(True),
+            Activity.is_onboarding_diagnostic.is_(False),
             Activity.active.is_(True),
         )
     )
@@ -1850,6 +2833,10 @@ def submit_attempt(
     db: Session = Depends(get_db),
     student: User = Depends(require_role("student")),
 ):
+    # Lock this learner's row for the duration of the submission transaction.
+    # PostgreSQL then serializes maximum-attempt checks and attempt numbering;
+    # SQLite safely treats FOR UPDATE as a no-op for local development.
+    db.execute(select(User.id).where(User.id == student.id).with_for_update())
     activity = db.get(Activity, payload.activity_id)
     if not activity or not activity.active:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -1991,7 +2978,14 @@ def submit_attempt(
         is_demo=student.is_demo,
     )
     db.add(attempt)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This attempt was already submitted",
+        ) from error
     concept_stats: dict[int, dict[str, float]] = {}
     result_items = []
     for question_id, question in questions.items():
@@ -2155,6 +3149,21 @@ def submit_attempt(
         db, student, set(concept_stats), attempt.id
     )
     record_pathway_evidence(db, student.id, activity.id, attempt)
+    if activity.is_onboarding_diagnostic:
+        profile = db.scalar(
+            select(StudentProfile).where(StudentProfile.user_id == student.id)
+        )
+        if profile and profile.target_concept_id is None and updated_mastery:
+            physics_records = [
+                record
+                for record in updated_mastery
+                if db.get(Concept, record.concept_id).subject == "General Physics"
+            ]
+            weakest = min(
+                physics_records or updated_mastery,
+                key=lambda record: (record.mastery_score, record.concept_id),
+            )
+            profile.target_concept_id = weakest.concept_id
     db.commit()
     previous_selected = db.scalar(
         select(PathwayRecommendation)
@@ -2196,6 +3205,16 @@ def submit_attempt(
             if item.get("misconception")
         ],
         "mental_effort": "Pending learner rating",
+        "analysis_type": (
+            "NeuroLearn-X onboarding diagnostic analysis"
+            if activity.is_onboarding_diagnostic
+            else "NeuroLearn-X adaptive evidence analysis"
+        ),
+        "learning_gaps_identified": [
+            db.get(Concept, record.concept_id).name
+            for record in sorted(updated_mastery, key=lambda row: row.mastery_score)
+            if record.classification != "Mastered"
+        ],
         "pathway_changed": bool(
             (previous_selected.id if previous_selected else None)
             != (current_selected.id if current_selected else None)
@@ -2270,7 +3289,35 @@ def save_mental_effort(
     generate_pathways(
         db, student, trigger_type="Mental-effort rating", trigger_id=rating_record.id
     )
-    return {"rating": payload.rating, "category": category}
+    try:
+        cognitive_load_analysis = predict_student_cognitive_load(db, student.id)
+    except ValueError:
+        cognitive_load_analysis = {"available": False}
+    profile = db.scalar(
+        select(StudentProfile).where(StudentProfile.user_id == student.id)
+    )
+    pathway = db.scalar(
+        select(PathwayRecommendation)
+        .where(
+            PathwayRecommendation.student_id == student.id,
+            PathwayRecommendation.active.is_(True),
+            PathwayRecommendation.selected.is_(True),
+        )
+        .order_by(PathwayRecommendation.created_at.desc())
+    )
+    return {
+        "rating": payload.rating,
+        "category": category,
+        "analysis_complete": True,
+        "target": (
+            concept_payload(db.get(Concept, profile.target_concept_id))
+            if profile and profile.target_concept_id
+            else None
+        ),
+        "predicted_pathway_load": pathway.cognitive_load_category if pathway else None,
+        "pathway_updated": pathway is not None,
+        "model_prediction_available": bool(cognitive_load_analysis.get("available")),
+    }
 
 
 @app.get("/api/student/pathways")
@@ -2379,18 +3426,39 @@ def student_history(
 def teacher_dashboard(
     db: Session = Depends(get_db), _teacher: User = Depends(require_role("teacher"))
 ):
-    students = list(db.scalars(select(User).where(User.role == "student", User.is_active)))
-    attempts = db.scalar(select(func.count(AssessmentAttempt.id))) or 0
+    students = list(
+        db.scalars(
+            select(User)
+            .where(
+                User.role == "student",
+                User.is_active.is_(True),
+                User.account_status == "Active",
+            )
+            .order_by(User.updated_at.desc())
+        )
+    )
+    active_student_ids = [student.id for student in students]
+    attempts = (
+        db.scalar(
+            select(func.count(AssessmentAttempt.id)).where(
+                AssessmentAttempt.student_id.in_(active_student_ids)
+            )
+        )
+        if active_student_ids
+        else 0
+    ) or 0
     active_pathways = db.scalar(
         select(func.count(PathwayRecommendation.id)).where(
             PathwayRecommendation.active.is_(True),
             PathwayRecommendation.selected.is_(True),
+            PathwayRecommendation.student_id.in_(active_student_ids),
         )
     ) or 0
     loads = {
         label: db.scalar(
             select(func.count(MentalEffortRating.id)).where(
-                MentalEffortRating.category == label
+                MentalEffortRating.category == label,
+                MentalEffortRating.student_id.in_(active_student_ids),
             )
         )
         or 0
@@ -2398,7 +3466,9 @@ def teacher_dashboard(
     }
     mastery_records = list(
         db.scalars(
-            select(MasteryRecord).order_by(MasteryRecord.created_at.desc())
+            select(MasteryRecord)
+            .where(MasteryRecord.student_id.in_(active_student_ids))
+            .order_by(MasteryRecord.created_at.desc())
         )
     )
     latest_by_pair = {}
@@ -2417,13 +3487,15 @@ def teacher_dashboard(
             MisconceptionHistory.misconception_id == Misconception.id,
         )
         .where(MisconceptionHistory.resolved_at.is_(None))
+        .where(MisconceptionHistory.student_id.in_(active_student_ids))
         .group_by(Misconception.id)
         .order_by(func.count(MisconceptionHistory.id).desc())
         .limit(8)
     ).all()
     open_interventions = db.scalar(
         select(func.count(TeacherIntervention.id)).where(
-            TeacherIntervention.status == "Open"
+            TeacherIntervention.status == "Open",
+            TeacherIntervention.student_id.in_(active_student_ids),
         )
     ) or 0
     at_risk = len(
@@ -2480,14 +3552,30 @@ def teacher_students(
     page_size: int = Query(default=10, ge=5, le=100),
     paginated: bool = False,
     include_archived: bool = False,
+    include_deactivated: bool = False,
     db: Session = Depends(get_db),
     _teacher: User = Depends(require_role("teacher")),
 ):
     query = select(User).where(User.role == "student")
     if account_status == "Archived":
         query = query.where(User.account_status == "Archived")
-    elif not include_archived:
+    elif account_status == "Deactivated":
+        query = query.where(
+            User.account_status == "Deactivated",
+            User.is_active.is_(False),
+        )
+    elif account_status == "Active":
+        query = query.where(
+            User.account_status == "Active",
+            User.is_active.is_(True),
+        )
+    elif include_deactivated:
         query = query.where(User.account_status != "Archived")
+    elif not include_archived:
+        query = query.where(
+            User.account_status == "Active",
+            User.is_active.is_(True),
+        )
     if search:
         query = query.where(
             or_(
@@ -2617,6 +3705,153 @@ def teacher_students(
     }
 
 
+def delete_attempt_records(db: Session, attempt_ids: list[int]) -> None:
+    if not attempt_ids:
+        return
+    session_ids = list(
+        db.scalars(
+            select(TutoringSession.id).where(
+                TutoringSession.attempt_id.in_(attempt_ids)
+            )
+        )
+    )
+    if session_ids:
+        db.execute(
+            delete(TutoringResponse).where(
+                TutoringResponse.session_id.in_(session_ids)
+            )
+        )
+        db.execute(
+            delete(LearningSummary).where(
+                LearningSummary.tutoring_session_id.in_(session_ids)
+            )
+        )
+        db.execute(
+            delete(MisconceptionHistory).where(
+                MisconceptionHistory.tutoring_session_id.in_(session_ids)
+            )
+        )
+        db.execute(delete(TutoringSession).where(TutoringSession.id.in_(session_ids)))
+    db.execute(
+        update(PathwayStep)
+        .where(PathwayStep.completion_attempt_id.in_(attempt_ids))
+        .values(completion_attempt_id=None, completed_at=None)
+    )
+    db.execute(
+        delete(MisconceptionHistory).where(
+            or_(
+                MisconceptionHistory.attempt_id.in_(attempt_ids),
+                MisconceptionHistory.resolved_by_attempt_id.in_(attempt_ids),
+            )
+        )
+    )
+    for model in (
+        LearningSummary,
+        MentalEffortRating,
+        InteractionLog,
+        ItemResponse,
+        MasteryRecord,
+    ):
+        db.execute(delete(model).where(model.attempt_id.in_(attempt_ids)))
+    db.execute(
+        delete(AssessmentAttempt).where(AssessmentAttempt.id.in_(attempt_ids))
+    )
+
+
+def permanently_delete_student(db: Session, student: User) -> None:
+    pathway_ids = list(
+        db.scalars(
+            select(PathwayRecommendation.id).where(
+                PathwayRecommendation.student_id == student.id
+            )
+        )
+    )
+    if pathway_ids:
+        db.execute(
+            delete(ExpertEvaluation).where(
+                ExpertEvaluation.pathway_id.in_(pathway_ids)
+            )
+        )
+        db.execute(
+            delete(TeacherIntervention).where(
+                or_(
+                    TeacherIntervention.student_id == student.id,
+                    TeacherIntervention.pathway_id.in_(pathway_ids),
+                )
+            )
+        )
+        db.execute(delete(PathwayStep).where(PathwayStep.pathway_id.in_(pathway_ids)))
+        db.execute(
+            delete(PathwayVersion).where(
+                or_(
+                    PathwayVersion.student_id == student.id,
+                    PathwayVersion.pathway_id.in_(pathway_ids),
+                    PathwayVersion.previous_pathway_id.in_(pathway_ids),
+                )
+            )
+        )
+        db.execute(
+            delete(PathwayRecommendation).where(
+                PathwayRecommendation.id.in_(pathway_ids)
+            )
+        )
+    else:
+        db.execute(
+            delete(TeacherIntervention).where(
+                TeacherIntervention.student_id == student.id
+            )
+        )
+        db.execute(
+            delete(PathwayVersion).where(PathwayVersion.student_id == student.id)
+        )
+    session_ids = list(
+        db.scalars(
+            select(TutoringSession.id).where(
+                TutoringSession.student_id == student.id
+            )
+        )
+    )
+    if session_ids:
+        db.execute(
+            delete(TutoringResponse).where(
+                TutoringResponse.session_id.in_(session_ids)
+            )
+        )
+    attempt_ids = list(
+        db.scalars(
+            select(AssessmentAttempt.id).where(
+                AssessmentAttempt.student_id == student.id
+            )
+        )
+    )
+    delete_attempt_records(db, attempt_ids)
+    for model in (
+        CognitiveLoadPrediction,
+        MisconceptionHistory,
+        LearningSummary,
+        TutoringSession,
+        MentalEffortRating,
+        InteractionLog,
+        MasteryRecord,
+        LearningGap,
+        AssessmentAssignment,
+        ConsentRecord,
+    ):
+        db.execute(delete(model).where(model.student_id == student.id))
+    db.execute(delete(StudentProfile).where(StudentProfile.user_id == student.id))
+    db.execute(
+        update(LoginHistory)
+        .where(LoginHistory.user_id == student.id)
+        .values(user_id=None)
+    )
+    db.execute(
+        update(AuditLog)
+        .where(AuditLog.actor_id == student.id)
+        .values(actor_id=None)
+    )
+    db.execute(delete(User).where(User.id == student.id))
+
+
 @app.post("/api/teacher/students/{student_id}/actions")
 def manage_student_account(
     student_id: int,
@@ -2639,9 +3874,15 @@ def manage_student_account(
     elif payload.action == "deactivate":
         student.account_status = "Deactivated"
         student.is_active = False
-    elif payload.action in {"archive", "remove"}:
+    elif payload.action == "archive":
         student.account_status = "Archived"
         student.is_active = False
+
+    removed_student = None
+    if payload.action == "remove":
+        student.account_status = "Archived"
+        student.is_active = False
+        removed_student = user_payload(student)
 
     audit(
         db,
@@ -2660,16 +3901,21 @@ def manage_student_account(
             ),
         },
     )
+    if payload.action == "remove":
+        permanently_delete_student(db, student)
     db.commit()
     return {
         "ok": True,
         "message": (
             "Temporary password created. The student must change it after signing in."
             if temporary_password
+            else f"{removed_student['display_name']} and linked learner records were permanently removed."
+            if removed_student
             else f"{student.display_name}'s account is now {student.account_status}."
         ),
         "temporary_password": temporary_password,
-        "student": user_payload(student),
+        "student": removed_student or user_payload(student),
+        "deleted": bool(removed_student),
     }
 
 
@@ -3193,7 +4439,14 @@ def create_concept(
     db: Session = Depends(get_db),
     teacher: User = Depends(require_role("teacher")),
 ):
-    concept = Concept(**payload.model_dump(), code=payload.code.strip().upper())
+    values = payload.model_dump()
+    values.update(
+        code=payload.code.strip().upper(),
+        name=payload.name.strip(),
+        subject=payload.subject.strip(),
+        description=payload.description.strip(),
+    )
+    concept = Concept(**values)
     db.add(concept)
     try:
         db.flush()
@@ -3216,8 +4469,21 @@ def update_concept(
     concept = db.get(Concept, concept_id)
     if not concept:
         raise HTTPException(status_code=404, detail="Concept not found")
-    for key, value in payload.model_dump().items():
-        setattr(concept, key, value.strip().upper() if key == "code" else value)
+    code = payload.code.strip().upper()
+    duplicate = db.scalar(
+        select(Concept.id).where(Concept.code == code, Concept.id != concept.id)
+    )
+    if duplicate:
+        raise HTTPException(status_code=409, detail="Concept code already exists")
+    values = payload.model_dump()
+    values.update(
+        code=code,
+        name=payload.name.strip(),
+        subject=payload.subject.strip(),
+        description=payload.description.strip(),
+    )
+    for key, value in values.items():
+        setattr(concept, key, value)
     audit(db, teacher.id, "concept.updated", "concept", concept.id, payload.model_dump())
     db.commit()
     return concept_payload(concept)
@@ -3406,6 +4672,136 @@ def archive_restore_activity(
     return activity_payload(db, activity)
 
 
+def permanently_delete_activity(
+    db: Session,
+    activity: Activity,
+    confirm_learner_record_deletion: bool,
+) -> dict[str, int]:
+    attempt_ids = list(db.scalars(select(AssessmentAttempt.id).where(
+        AssessmentAttempt.activity_id == activity.id
+    )))
+    result_count = db.scalar(select(func.count(AssessmentAttempt.id)).where(
+        AssessmentAttempt.activity_id == activity.id,
+        AssessmentAttempt.submitted_at.is_not(None),
+    )) or 0
+    assessment_ids = list(db.scalars(select(Assessment.id).where(
+        Assessment.activity_id == activity.id
+    )))
+    assigned_count = 0
+    if assessment_ids:
+        assigned_count = db.scalar(select(func.count(AssessmentAssignment.id)).where(
+            AssessmentAssignment.assessment_id.in_(assessment_ids)
+        )) or 0
+    pathway_steps = db.scalar(select(func.count(PathwayStep.id)).where(
+        PathwayStep.activity_id == activity.id
+    )) or 0
+    if (attempt_ids or assigned_count or pathway_steps) and not confirm_learner_record_deletion:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f'Deleting "{activity.title}" affects {assigned_count} assignment(s), '
+                f'{len(attempt_ids)} learner attempt(s), {result_count} result(s), and '
+                f'{pathway_steps} saved pathway step(s). Confirm related-record deletion to continue.'
+            ),
+        )
+    if attempt_ids:
+        delete_attempt_records(db, attempt_ids)
+    session_ids = list(db.scalars(select(TutoringSession.id).where(
+        TutoringSession.activity_id == activity.id
+    )))
+    if session_ids:
+        db.execute(delete(TutoringResponse).where(TutoringResponse.session_id.in_(session_ids)))
+        db.execute(delete(MisconceptionHistory).where(MisconceptionHistory.tutoring_session_id.in_(session_ids)))
+        db.execute(delete(LearningSummary).where(LearningSummary.tutoring_session_id.in_(session_ids)))
+        db.execute(delete(TutoringSession).where(TutoringSession.id.in_(session_ids)))
+    db.execute(delete(LearningSummary).where(LearningSummary.activity_id == activity.id))
+    if assessment_ids:
+        db.execute(delete(AssessmentAssignment).where(AssessmentAssignment.assessment_id.in_(assessment_ids)))
+        db.execute(delete(AssessmentQuestion).where(AssessmentQuestion.assessment_id.in_(assessment_ids)))
+        db.execute(delete(Assessment).where(Assessment.id.in_(assessment_ids)))
+    question_ids = list(db.scalars(select(Question.id).where(Question.activity_id == activity.id)))
+    if question_ids:
+        db.execute(delete(AssessmentQuestion).where(AssessmentQuestion.question_id.in_(question_ids)))
+        db.execute(delete(AnswerChoice).where(AnswerChoice.question_id.in_(question_ids)))
+        db.execute(delete(Question).where(Question.id.in_(question_ids)))
+    db.execute(delete(PathwayStep).where(PathwayStep.activity_id == activity.id))
+    db.execute(update(Misconception).where(Misconception.suggested_activity_id == activity.id).values(suggested_activity_id=None))
+    db.execute(update(TeacherIntervention).where(TeacherIntervention.assigned_activity_id == activity.id).values(assigned_activity_id=None))
+    db.execute(delete(ActivityConcept).where(ActivityConcept.activity_id == activity.id))
+    db.delete(activity)
+    db.flush()
+    return {
+        "assignments": int(assigned_count),
+        "attempts": len(attempt_ids),
+        "results": int(result_count),
+        "pathway_steps": int(pathway_steps),
+    }
+
+
+@app.delete("/api/teacher/activities/bulk-delete")
+def bulk_delete_activities(
+    activity_ids: list[int] = Query(min_length=1, max_length=500),
+    confirm_learner_record_deletion: bool = False,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(require_role("teacher")),
+):
+    unique_ids = list(dict.fromkeys(activity_ids))
+    activities = list(db.scalars(select(Activity).where(Activity.id.in_(unique_ids))))
+    if len(activities) != len(unique_ids):
+        raise HTTPException(status_code=404, detail="One or more activities were not found")
+    totals = {"assignments": 0, "attempts": 0, "results": 0, "pathway_steps": 0}
+    for activity in activities:
+        removed = permanently_delete_activity(db, activity, confirm_learner_record_deletion)
+        for key, value in removed.items():
+            totals[key] += value
+    audit(db, teacher.id, "activity.bulk_deleted", "activity", details={"activity_ids": unique_ids, **totals})
+    db.commit()
+    return {"ok": True, "deleted": len(unique_ids), "related_records_removed": totals}
+
+
+@app.post("/api/teacher/activities/bulk")
+def bulk_activity_action(
+    payload: ActivityBulkInput,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(require_role("teacher")),
+):
+    unique_ids = list(dict.fromkeys(payload.activity_ids))
+    activities = list(db.scalars(select(Activity).where(Activity.id.in_(unique_ids))))
+    if len(activities) != len(unique_ids):
+        raise HTTPException(status_code=404, detail="One or more activities were not found")
+    if payload.action == "archive":
+        for activity in activities:
+            activity.active = False
+        audit(db, teacher.id, "activity.bulk_archived", "activity", details={"activity_ids": unique_ids})
+        db.commit()
+        return {"ok": True, "archived": len(unique_ids)}
+    totals = {"assignments": 0, "attempts": 0, "results": 0, "pathway_steps": 0}
+    for activity in activities:
+        removed = permanently_delete_activity(db, activity, payload.confirm_learner_record_deletion)
+        for key, value in removed.items():
+            totals[key] += value
+    audit(db, teacher.id, "activity.bulk_deleted", "activity", details={"activity_ids": unique_ids, **totals})
+    db.commit()
+    return {"ok": True, "deleted": len(unique_ids), "related_records_removed": totals}
+
+
+@app.delete("/api/teacher/activities/{activity_id}")
+def delete_activity(
+    activity_id: int,
+    confirm_learner_record_deletion: bool = False,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(require_role("teacher")),
+):
+    activity = db.get(Activity, activity_id)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    title = activity.title
+    removed = permanently_delete_activity(db, activity, confirm_learner_record_deletion)
+    audit(db, teacher.id, "activity.deleted", "activity", activity_id, {"title": title, **removed})
+    db.commit()
+    return {"ok": True, "id": activity_id, "title": title, "related_records_removed": removed}
+
+
 @app.post("/api/teacher/questions", status_code=201)
 def create_question(
     payload: QuestionInput,
@@ -3492,6 +4888,23 @@ def update_question(
     return {"id": question.id, "ok": True}
 
 
+@app.get("/api/teacher/ai/configuration")
+def teacher_ai_configuration(
+    _teacher: User = Depends(require_role("teacher")),
+):
+    configuration = ai_configuration()
+    return {
+        "configured": configuration["configured"],
+        "provider": configuration["provider"],
+        "model": configuration["model"],
+        "message": (
+            "AI-assisted module analysis and question generation are configured."
+            if configuration["configured"]
+            else "Set AI_PROVIDER, AI_MODEL, and AI_API_KEY in the backend environment."
+        ),
+    }
+
+
 @app.get("/api/teacher/documents")
 def teacher_documents(
     db: Session = Depends(get_db),
@@ -3552,7 +4965,16 @@ async def upload_learning_document(
         )
     if extension == ".pdf" and not data.startswith(b"%PDF"):
         raise HTTPException(status_code=422, detail="The PDF signature is invalid")
-    extracted_text = extract_document_text(extension, data)
+    try:
+        extracted_text = await asyncio.wait_for(
+            asyncio.to_thread(extract_document_text, extension, data),
+            timeout=float(os.getenv("UPLOAD_PROCESSING_TIMEOUT_SECONDS", "45")),
+        )
+    except TimeoutError as error:
+        raise HTTPException(
+            status_code=504,
+            detail="Document processing took too long. Try a smaller file.",
+        ) from error
     document = UploadedDocument(
         original_filename=filename,
         file_type=extension.removeprefix(".").upper(),
@@ -3641,6 +5063,26 @@ def generate_document_questions(
                 continue
             if material_supports_concept(prerequisite, document.extracted_text):
                 concept_ids.append(prerequisite.id)
+    allowed_concepts = [db.get(Concept, concept_id) for concept_id in concept_ids]
+    allowed_concepts = [concept for concept in allowed_concepts if concept]
+    ai_result = request_ai_question_generation(document, payload, allowed_concepts)
+    ai_questions = ai_result.get("questions", [])
+    if not ai_questions:
+        raise HTTPException(status_code=502, detail="The AI service did not return any usable questions")
+    if len(ai_questions) < payload.number_of_questions:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"The AI service returned {len(ai_questions)} questions but "
+                f"{payload.number_of_questions} were requested. No partial set was saved."
+            ),
+        )
+    if isinstance(ai_result.get("analysis"), dict):
+        document.analysis = {
+            **(document.analysis or {}),
+            **ai_result["analysis"],
+            "method": f"AI-assisted analysis using {ai_configuration()['provider']} / {ai_configuration()['model']}",
+        }
     generated = []
     prior_prompts = {
         re.sub(r"\W+", " ", value.casefold()).strip()
@@ -3651,60 +5093,88 @@ def generate_document_questions(
             )
         )
     }
-    for index in range(payload.number_of_questions):
-        concept = db.get(Concept, concept_ids[index % len(concept_ids)])
-        data = generated_material_question(
-            passages,
-            index,
-            payload.question_type,
-            concept,
-            payload.topic,
-            payload.include_calculations,
-        )
-        if not material_supports_concept(concept, document.extracted_text):
-            data["validation_flags"].append(
-                f'The uploaded material does not explicitly support the selected concept "{concept.name}".'
-            )
-        validation_status, validation_flags = validate_generated_question(
-            data,
-            concept,
-            payload.learning_competency,
-            prior_prompts,
-        )
+    allowed_ids = {concept.id for concept in allowed_concepts}
+    for index, raw in enumerate(ai_questions[: payload.number_of_questions]):
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=502, detail="The AI service returned a malformed question")
+        concept_id = int(raw.get("concept_id") or selected_concept.id)
+        concept = db.get(Concept, concept_id) if concept_id in allowed_ids else selected_concept
+        question_type = clean_content(str(raw.get("question_type") or payload.question_type), 30)
+        if question_type == "Mixed":
+            question_type = "Multiple choice"
+        choices = raw.get("choices") if isinstance(raw.get("choices"), list) else []
+        choices = [
+            {
+                "text": clean_content(str(choice.get("text", "")), 3000),
+                "is_correct": bool(choice.get("is_correct")),
+            }
+            for choice in choices
+            if isinstance(choice, dict) and clean_content(str(choice.get("text", "")), 3000)
+        ]
+        correct_answer = clean_content(str(raw.get("correct_answer", "")), 3000)
+        if question_type in {"Multiple choice", "True or false"} and choices:
+            correct_choices = [choice for choice in choices if choice["is_correct"]]
+            if len(correct_choices) != 1:
+                choices = [
+                    {**choice, "is_correct": choice["text"].casefold() == correct_answer.casefold()}
+                    for choice in choices
+                ]
+        validation = raw.get("validation") if isinstance(raw.get("validation"), dict) else {}
+        required_checks = {
+            "answerable", "answer_correct", "solution_consistent", "formula_units_valid",
+            "source_supported", "distractors_valid", "not_duplicate",
+            "difficulty_followed", "no_unrelated_topic",
+        }
+        validation_flags = [
+            clean_content(str(note), 250)
+            for note in raw.get("validation_notes", [])
+            if clean_content(str(note), 250)
+        ]
+        failed_checks = sorted(check for check in required_checks if validation.get(check) is not True)
+        validation_flags.extend(f"AI quality check needs review: {check.replace('_', ' ')}." for check in failed_checks)
+        prompt_value = clean_content(str(raw.get("prompt", "")))
+        prompt_key = re.sub(r"\W+", " ", prompt_value.casefold()).strip()
+        if not prompt_value or not correct_answer:
+            raise HTTPException(status_code=502, detail="The AI service returned an incomplete question")
+        if prompt_key in prior_prompts:
+            validation_flags.append("Duplicate question detected; teacher review is required.")
+        source_locator = clean_content(str(raw.get("source_locator", "")), 300)
+        if payload.source_grounding and not source_locator:
+            validation_flags.append("No source page or section was supplied.")
+        validation_status = "Ready for review" if not validation_flags else "Needs review"
         question = Question(
             activity_id=None,
             concept_id=concept.id,
-            prompt=clean_content(data["prompt"]),
-            feedback=(
-                f"The answer follows {data['source_locator']}: {data['correct_answer']}"
-                if payload.include_explanations
-                else ""
-            ),
-            explanation=(
-                f"The answer follows {data['source_locator']}: {data['correct_answer']}"
-                if payload.include_explanations
-                else ""
-            ),
-            hint=(
-                f"Review {data['source_locator']} and the section discussing {concept.name}."
-                if payload.include_hints
-                else ""
-            ),
-            question_type=payload.question_type,
-            correct_answer=clean_content(data["correct_answer"], 3000),
+            prompt=prompt_value,
+            feedback=clean_content(str(raw.get("explanation", ""))) if payload.include_explanations else "",
+            explanation=clean_content(str(raw.get("explanation", ""))) if payload.include_explanations else "",
+            hint=clean_content(str(raw.get("hint", "")), 3000) if payload.include_hints else "",
+            question_type=question_type,
+            correct_answer=correct_answer,
             difficulty_label=payload.difficulty,
             cognitive_level=payload.cognitive_level,
             subject=payload.subject,
             topic=payload.topic,
-            learning_competency=payload.learning_competency,
-            source_type="Generated from uploaded material",
+            learning_competency=clean_content(str(raw.get("learning_competency") or payload.learning_competency), 1000),
+            source_type="AI-generated from uploaded material",
             source_document_id=document.id,
-            source_locator=data["source_locator"],
-            solution_steps=data["solution_steps"],
+            source_locator=source_locator,
+            solution_steps=clean_content(str(raw.get("solution_steps", ""))) if payload.include_solutions else "",
+            estimated_cognitive_demand=max(0, min(1, float(raw.get("estimated_cognitive_demand", 0.5)))),
             validation_status=validation_status,
             validation_flags=validation_flags,
-            distractor_rationales=data["distractor_rationales"],
-            is_calculation=data["is_calculation"],
+            generation_metadata={
+                "provider": ai_configuration()["provider"],
+                "model": ai_configuration()["model"],
+                "settings": payload.model_dump(),
+                "quality_review": validation,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            distractor_rationales={
+                clean_content(str(key), 500): clean_content(str(value), 1000)
+                for key, value in (raw.get("distractor_rationales") or {}).items()
+            },
+            is_calculation=bool(raw.get("is_calculation")),
             status="Draft",
             created_by=teacher.id,
             points=1,
@@ -3713,9 +5183,9 @@ def generate_document_questions(
         )
         db.add(question)
         db.flush()
-        replace_question_choices(db, question, data["choices"])
+        replace_question_choices(db, question, choices)
         generated.append(question)
-        prior_prompts.add(re.sub(r"\W+", " ", data["prompt"].casefold()).strip())
+        prior_prompts.add(prompt_key)
     audit(
         db,
         teacher.id,
@@ -3820,6 +5290,7 @@ def question_bank(
     difficulty: str | None = None,
     source_document_id: int | None = None,
     status_filter: str | None = None,
+    ids_only: bool = False,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=12, ge=5, le=100),
     db: Session = Depends(get_db),
@@ -3845,6 +5316,11 @@ def question_bank(
     else:
         query = query.where(Question.status != "Archived")
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    if ids_only:
+        return {
+            "ids": list(db.scalars(query.with_only_columns(Question.id).order_by(Question.id))),
+            "total": total,
+        }
     questions = list(
         db.scalars(
             query.order_by(Question.updated_at.desc())
@@ -3906,6 +5382,135 @@ def update_question_bank_item(
     audit(db, teacher.id, "question_bank.updated", "question", question.id)
     db.commit()
     return question_bank_payload(db, question)
+
+
+def question_assessment_dependencies(db: Session, question_id: int) -> list[str]:
+    return list(
+        db.scalars(
+            select(Assessment.title)
+            .join(
+                AssessmentQuestion,
+                AssessmentQuestion.assessment_id == Assessment.id,
+            )
+            .where(AssessmentQuestion.question_id == question_id)
+            .order_by(Assessment.title)
+        )
+    )
+
+
+def delete_question_record(
+    db: Session,
+    question: Question,
+    detach_from_assessments: bool,
+) -> list[str]:
+    dependencies = question_assessment_dependencies(db, question.id)
+    if dependencies and not detach_from_assessments:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f'Question "{question.prompt[:120]}" belongs to: '
+                f"{', '.join(dependencies)}. Confirm removal from those assessments before deleting it."
+            ),
+        )
+    evidence_count = sum(
+        db.scalar(select(func.count(model.id)).where(model.question_id == question.id))
+        or 0
+        for model in (ItemResponse, TutoringResponse, MisconceptionHistory)
+    )
+    if evidence_count:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This question has learner response evidence and cannot be permanently "
+                "deleted safely. Archive it instead."
+            ),
+        )
+    if dependencies:
+        db.execute(
+            delete(AssessmentQuestion).where(
+                AssessmentQuestion.question_id == question.id
+            )
+        )
+    db.execute(delete(AnswerChoice).where(AnswerChoice.question_id == question.id))
+    db.delete(question)
+    return dependencies
+
+
+@app.delete("/api/teacher/question-bank/bulk-delete")
+def bulk_delete_question_bank_items(
+    question_ids: list[int] = Query(min_length=1, max_length=100),
+    detach_from_assessments: bool = False,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(require_role("teacher")),
+):
+    unique_ids = list(dict.fromkeys(question_ids))
+    questions = list(db.scalars(select(Question).where(Question.id.in_(unique_ids))))
+    if len(questions) != len(unique_ids):
+        raise HTTPException(status_code=404, detail="One or more questions were not found")
+    # Preflight every record so a dependency error cannot leave a partial deletion.
+    for question in questions:
+        dependencies = question_assessment_dependencies(db, question.id)
+        if dependencies and not detach_from_assessments:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "One or more selected questions belong to assessments: "
+                    f"{', '.join(sorted(set(dependencies)))}. Confirm removal from the assessments first."
+                ),
+            )
+        evidence_count = sum(
+            db.scalar(
+                select(func.count(model.id)).where(model.question_id == question.id)
+            )
+            or 0
+            for model in (ItemResponse, TutoringResponse, MisconceptionHistory)
+        )
+        if evidence_count:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f'Question "{question.prompt[:120]}" has learner response evidence '
+                    "and must be archived instead."
+                ),
+            )
+    prompts = [question.prompt for question in questions]
+    for question in questions:
+        delete_question_record(db, question, detach_from_assessments)
+    audit(
+        db,
+        teacher.id,
+        "question_bank.bulk_deleted",
+        "question",
+        details={"question_ids": unique_ids, "prompts": prompts},
+    )
+    db.commit()
+    return {"ok": True, "deleted": len(unique_ids)}
+
+
+@app.delete("/api/teacher/question-bank/{question_id}")
+def delete_question_bank_item(
+    question_id: int,
+    detach_from_assessments: bool = False,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(require_role("teacher")),
+):
+    question = db.get(Question, question_id)
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    prompt = question.prompt
+    dependencies = delete_question_record(
+        db, question, detach_from_assessments
+    )
+    audit(
+        db,
+        teacher.id,
+        "question_bank.deleted",
+        "question",
+        question_id,
+        {"prompt": prompt, "removed_from_assessments": dependencies},
+    )
+    db.commit()
+    return {"ok": True, "id": question_id, "prompt": prompt}
 
 
 def regenerate_bank_question(
@@ -4019,6 +5624,72 @@ def question_bank_action(
     )
     db.commit()
     return question_bank_payload(db, result)
+
+
+@app.patch("/api/teacher/question-bank/bulk-edit")
+def bulk_edit_question_bank_items(
+    payload: QuestionBulkEditInput,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(require_role("teacher")),
+):
+    unique_ids = list(dict.fromkeys(payload.question_ids))
+    questions = list(db.scalars(select(Question).where(Question.id.in_(unique_ids))))
+    if len(questions) != len(unique_ids):
+        raise HTTPException(status_code=404, detail="One or more questions were not found")
+    if payload.concept_id and not db.get(Concept, payload.concept_id):
+        raise HTTPException(status_code=404, detail="Concept not found")
+    misconception = db.get(Misconception, payload.misconception_id) if payload.misconception_id else None
+    if payload.misconception_id and not misconception:
+        raise HTTPException(status_code=404, detail="Misconception tag not found")
+    changed_fields = []
+    mapping = {
+        "concept_id": "concept_id",
+        "difficulty": "difficulty_label",
+        "status": "status",
+        "learning_competency": "learning_competency",
+        "question_type": "question_type",
+        "cognitive_level": "cognitive_level",
+    }
+    values = payload.model_dump(exclude={"question_ids", "misconception_id"})
+    for input_name, model_name in mapping.items():
+        value = values.get(input_name)
+        if value is None:
+            continue
+        changed_fields.append(input_name)
+        for question in questions:
+            setattr(question, model_name, value)
+    if misconception:
+        changed_fields.append("misconception_id")
+        for question in questions:
+            if misconception.concept_id != question.concept_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail="The misconception tag must belong to every selected question's concept",
+                )
+            db.execute(
+                update(AnswerChoice)
+                .where(
+                    AnswerChoice.question_id == question.id,
+                    AnswerChoice.is_correct.is_(False),
+                )
+                .values(
+                    misconception_id=misconception.id,
+                    mapping_status="Teacher reviewed",
+                )
+            )
+    audit(
+        db,
+        teacher.id,
+        "question_bank.bulk_edited",
+        "question",
+        details={"question_ids": unique_ids, "changed_fields": changed_fields},
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "updated": len(unique_ids),
+        "items": [question_bank_payload(db, question) for question in questions],
+    }
 
 
 @app.post("/api/teacher/question-bank/batch")
@@ -4231,6 +5902,16 @@ def teacher_assessments(
             "due_at": assessment.due_at,
             "published_at": assessment.published_at,
             "activity_id": assessment.activity_id,
+            "learner_record_count": (
+                db.scalar(
+                    select(func.count(AssessmentAttempt.id)).where(
+                        AssessmentAttempt.activity_id == assessment.activity_id
+                    )
+                )
+                if assessment.activity_id
+                else 0
+            )
+            or 0,
             "question_count": db.scalar(
                 select(func.count(AssessmentQuestion.id)).where(
                     AssessmentQuestion.assessment_id == assessment.id
@@ -4299,6 +5980,74 @@ def update_assessment_status(
     }
 
 
+@app.delete("/api/teacher/assessments/{assessment_id}")
+def delete_assessment(
+    assessment_id: int,
+    confirm_learner_record_deletion: bool = False,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(require_role("teacher")),
+):
+    assessment = db.get(Assessment, assessment_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    attempt_ids = (
+        list(
+            db.scalars(
+                select(AssessmentAttempt.id).where(
+                    AssessmentAttempt.activity_id == assessment.activity_id
+                )
+            )
+        )
+        if assessment.activity_id
+        else []
+    )
+    if attempt_ids and not confirm_learner_record_deletion:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f'Deleting "{assessment.title}" will also permanently remove '
+                f"{len(attempt_ids)} learner attempt record(s) and their linked responses, "
+                "mental-effort ratings, mastery evidence, and interaction logs. Confirm this deletion to continue."
+            ),
+        )
+    title = assessment.title
+    activity = db.get(Activity, assessment.activity_id) if assessment.activity_id else None
+    if attempt_ids:
+        delete_attempt_records(db, attempt_ids)
+    db.execute(
+        delete(AssessmentAssignment).where(
+            AssessmentAssignment.assessment_id == assessment.id
+        )
+    )
+    db.execute(
+        delete(AssessmentQuestion).where(
+            AssessmentQuestion.assessment_id == assessment.id
+        )
+    )
+    if activity:
+        activity.active = False
+    db.delete(assessment)
+    audit(
+        db,
+        teacher.id,
+        "assessment.deleted",
+        "assessment",
+        assessment_id,
+        {
+            "title": title,
+            "learner_attempts_removed": len(attempt_ids),
+            "activity_id": activity.id if activity else None,
+        },
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "id": assessment_id,
+        "title": title,
+        "learner_records_removed": len(attempt_ids),
+    }
+
+
 @app.get("/api/teacher/settings")
 def teacher_settings(
     db: Session = Depends(get_db), _teacher: User = Depends(require_role("teacher"))
@@ -4317,6 +6066,25 @@ def update_settings(
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error))
     result = save_settings(db, payload.model_dump())
+    active_students = list(
+        db.scalars(
+            select(User)
+            .join(StudentProfile, StudentProfile.user_id == User.id)
+            .where(
+                User.role == "student",
+                User.is_active.is_(True),
+                User.account_status == "Active",
+                StudentProfile.target_concept_id.is_not(None),
+            )
+        )
+    )
+    for student in active_students:
+        generate_pathways(
+            db,
+            student,
+            trigger_type="Optimization settings updated",
+            trigger_id=teacher.id,
+        )
     audit(db, teacher.id, "settings.updated", "system_settings", details=payload.model_dump())
     db.commit()
     return result
@@ -4358,6 +6126,13 @@ def model_versions(
             "student_count": version.student_count,
             "metrics": version.metrics,
             "feature_names": version.feature_names,
+            "metadata": version.metadata_json or {
+                "algorithm": "Soft-voting ensemble",
+                "ensemble_members": ["LogisticRegression", "RandomForestClassifier", "GradientBoostingClassifier"],
+                "class_labels": ["Low", "Moderate", "High"],
+                "evaluation_method": (version.metrics or {}).get("evaluation"),
+                "deployment_status": "Active" if version.active else "Historical",
+            },
             "warning": version.warning,
             "is_demo": version.is_demo,
             "active": version.active,
@@ -4368,26 +6143,245 @@ def model_versions(
     ]
 
 
+@app.get("/api/teacher/models/predict")
+def learner_cognitive_load_prediction(
+    student_id: int,
+    db: Session = Depends(get_db),
+    _teacher: User = Depends(require_role("teacher")),
+):
+    try:
+        return predict_student_cognitive_load(db, student_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+
+
+@app.post("/api/teacher/models/diagnose-all")
+def diagnose_all_active_students(
+    db: Session = Depends(get_db),
+    teacher: User = Depends(require_role("teacher")),
+):
+    students = list(db.scalars(select(User).where(
+        User.role == "student",
+        User.is_active.is_(True),
+        User.account_status == "Active",
+        User.is_demo == teacher.is_demo,
+    ).order_by(User.participant_code)))
+    results = []
+    for student in students:
+        try:
+            results.append(predict_student_cognitive_load(db, student.id))
+        except ValueError as error:
+            results.append({
+                "available": False,
+                "student_id": student.id,
+                "participant_code": student.participant_code,
+                "message": str(error),
+            })
+    audit(db, teacher.id, "model.diagnosed_all", "cognitive_load_prediction", details={
+        "students": len(students),
+        "predictions": sum(1 for item in results if item.get("available")),
+    })
+    db.commit()
+    return {"items": results, "students": len(students)}
+
+
+@app.get("/api/teacher/models/predictions")
+def stored_cognitive_load_predictions(
+    student_id: int | None = None,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(require_role("teacher")),
+):
+    query = select(CognitiveLoadPrediction).join(User, User.id == CognitiveLoadPrediction.student_id).where(
+        CognitiveLoadPrediction.is_demo == teacher.is_demo
+    )
+    if student_id:
+        query = query.where(CognitiveLoadPrediction.student_id == student_id)
+    rows = list(db.scalars(query.order_by(CognitiveLoadPrediction.created_at.desc()).limit(200)))
+    return [{
+        "id": row.id,
+        "student_id": row.student_id,
+        "participant_code": db.get(User, row.student_id).participant_code,
+        "model_version": db.get(ModelVersion, row.model_version_id).version,
+        "evidence_date": row.evidence_date,
+        "probabilities": row.probabilities,
+        "category": row.predicted_category,
+        "expected_index": row.expected_index,
+        "confidence": row.confidence,
+        "evidence": row.evidence,
+        "missing_features": row.missing_features,
+        "feature_contributions": row.feature_contributions,
+        "recommended_action": row.recommended_action,
+        "created_at": row.created_at,
+    } for row in rows]
+
+
 @app.get("/api/teacher/pathways")
 def compare_pathways(
     student_id: int | None = None,
     db: Session = Depends(get_db),
     _teacher: User = Depends(require_role("teacher")),
 ):
-    query = select(PathwayRecommendation).where(PathwayRecommendation.active.is_(True))
+    query = (
+        select(PathwayRecommendation)
+        .join(User, User.id == PathwayRecommendation.student_id)
+        .where(
+            PathwayRecommendation.active.is_(True),
+            User.is_active.is_(True),
+            User.account_status == "Active",
+        )
+    )
     if student_id:
         query = query.where(PathwayRecommendation.student_id == student_id)
     pathways = list(
         db.scalars(query.order_by(PathwayRecommendation.created_at.desc()))
     )
-    return [
-        {
-            **serialize_pathway(db, pathway),
-            "participant_code": db.get(User, pathway.student_id).participant_code,
-            "student_id": pathway.student_id,
-        }
-        for pathway in pathways
-    ]
+    groups: dict[tuple[int, int], list[PathwayRecommendation]] = defaultdict(list)
+    for pathway in pathways:
+        groups[(pathway.student_id, pathway.target_concept_id)].append(pathway)
+    output = []
+    changed = False
+    for group in groups.values():
+        alpha = float(get_setting(db, "alpha"))
+        beta = float(get_setting(db, "beta"))
+        gamma = float(get_setting(db, "gamma"))
+        for pathway in group:
+            recalculated = adaptive_pathway_score(
+                pathway.gap_coverage,
+                pathway.predicted_cognitive_load,
+                pathway.normalized_learning_time,
+                alpha,
+                beta,
+                gamma,
+            )
+            if abs(pathway.adaptive_pathway_score - recalculated) > 1e-9:
+                pathway.adaptive_pathway_score = recalculated
+                changed = True
+        ranked = sorted(
+            group,
+            key=lambda item: (
+                -item.adaptive_pathway_score,
+                -item.gap_coverage,
+                item.predicted_cognitive_load,
+                item.total_minutes,
+                item.id,
+            ),
+        )
+        for rank, pathway in enumerate(ranked, start=1):
+            should_select = rank == 1
+            if pathway.selected != should_select:
+                pathway.selected = should_select
+                changed = True
+            serialized = serialize_pathway(db, pathway)
+            decision = serialized.get("decision_explanation") or {}
+            weights = {
+                "alpha": float(get_setting(db, "alpha")),
+                "beta": float(get_setting(db, "beta")),
+                "gamma": float(get_setting(db, "gamma")),
+            }
+            serialized.update(
+                {
+                    "participant_code": db.get(User, pathway.student_id).participant_code,
+                    "student_id": pathway.student_id,
+                    "rank": rank,
+                    "weights": weights,
+                    "weighted_contributions": {
+                        "gap_coverage": weights["alpha"] * pathway.gap_coverage,
+                        "load_suitability": weights["beta"]
+                        * (1 - pathway.predicted_cognitive_load),
+                        "time_efficiency": weights["gamma"]
+                        * (1 - pathway.normalized_learning_time),
+                    },
+                    "prerequisite_sequence": [
+                        step["concept"] for step in serialized.get("steps", [])
+                    ],
+                    "learning_gaps_addressed": (
+                        decision.get("prerequisite_chain") or []
+                    ),
+                    "selection_reason": (
+                        f"{pathway.label} was selected with the highest APS of {pathway.adaptive_pathway_score:.3f}. "
+                        f"It covers {pathway.gap_coverage:.0%} of detected gaps, has predicted cognitive load {pathway.predicted_cognitive_load:.3f}, "
+                        f"and requires about {pathway.total_minutes} minutes."
+                        if rank == 1
+                        else f"{pathway.label} was not selected because its APS of {pathway.adaptive_pathway_score:.3f} is below "
+                        f"{ranked[0].label} at {ranked[0].adaptive_pathway_score:.3f}. It covers {pathway.gap_coverage:.0%} of gaps, "
+                        f"has predicted cognitive load {pathway.predicted_cognitive_load:.3f}, and requires {pathway.total_minutes} minutes."
+                    ),
+                    "tie_breaker": (
+                        "Higher gap coverage, then lower cognitive load, then shorter estimated time, then stable database identifier."
+                    ),
+                }
+            )
+            output.append(serialized)
+    if changed:
+        db.commit()
+    return sorted(output, key=lambda item: (item["participant_code"], item["rank"]))
+
+
+@app.delete("/api/teacher/pathways/{pathway_id}")
+def delete_saved_pathway_comparison(
+    pathway_id: int,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(require_role("teacher")),
+):
+    pathway = db.get(PathwayRecommendation, pathway_id)
+    if not pathway:
+        raise HTTPException(status_code=404, detail="Pathway comparison not found")
+    student_id = pathway.student_id
+    target_concept_id = pathway.target_concept_id
+    label = pathway.label
+    db.execute(
+        update(PathwayRecommendation)
+        .where(PathwayRecommendation.supersedes_pathway_id == pathway.id)
+        .values(supersedes_pathway_id=None)
+    )
+    db.execute(delete(ExpertEvaluation).where(ExpertEvaluation.pathway_id == pathway.id))
+    db.execute(
+        delete(TeacherIntervention).where(
+            TeacherIntervention.pathway_id == pathway.id
+        )
+    )
+    db.execute(delete(PathwayStep).where(PathwayStep.pathway_id == pathway.id))
+    db.execute(
+        delete(PathwayVersion).where(
+            or_(
+                PathwayVersion.pathway_id == pathway.id,
+                PathwayVersion.previous_pathway_id == pathway.id,
+            )
+        )
+    )
+    db.delete(pathway)
+    db.flush()
+    remaining = list(
+        db.scalars(
+            select(PathwayRecommendation).where(
+                PathwayRecommendation.student_id == student_id,
+                PathwayRecommendation.target_concept_id == target_concept_id,
+                PathwayRecommendation.active.is_(True),
+            )
+        )
+    )
+    ranked = sorted(
+        remaining,
+        key=lambda item: (
+            -item.adaptive_pathway_score,
+            -item.gap_coverage,
+            item.predicted_cognitive_load,
+            item.total_minutes,
+            item.id,
+        ),
+    )
+    for index, item in enumerate(ranked):
+        item.selected = index == 0
+    audit(
+        db,
+        teacher.id,
+        "pathway.deleted",
+        "pathway_recommendation",
+        pathway_id,
+        {"label": label, "student_id": student_id},
+    )
+    db.commit()
+    return {"ok": True, "id": pathway_id, "label": label}
 
 
 @app.post("/api/teacher/evaluations", status_code=201)
@@ -4583,5 +6577,5 @@ def reset_demo(
 
 
 frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
-if frontend_dist.exists():
+if frontend_dist.exists() and os.getenv("VERCEL") != "1":
     app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")

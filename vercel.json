@@ -1,0 +1,20 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "experimentalServices": {
+    "frontend": {
+      "entrypoint": "frontend",
+      "routePrefix": "/"
+    },
+    "backend": {
+      "entrypoint": "backend/vercel.py",
+      "routePrefix": "/api",
+      "memory": 2048,
+      "maxDuration": 300,
+      "includeFiles": [
+        "backend/app/**",
+        "backend/alembic/**",
+        "backend/alembic.ini"
+      ]
+    }
+  }
+}

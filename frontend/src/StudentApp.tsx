@@ -35,7 +35,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, Route as RouterRoute, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, inlineApiError, post } from "./api";
 import {
@@ -51,6 +51,7 @@ import {
   ProgressBar,
 } from "./components";
 import { ShareButton } from "./pwa";
+import { Equation } from "./Equation";
 import {
   countdownTone,
   formatCountdown,
@@ -110,6 +111,26 @@ export default function StudentApp({
     reload();
   }, [reload]);
   useEffect(() => setMobileOpen(false), [location.pathname]);
+
+  if (!snapshot && location.pathname === "/student/onboarding") {
+    return (
+      <div className="grid min-h-screen place-items-center bg-navy-950 text-white">
+        <div><Brand /><Loading label="Preparing your welcome…" /></div>
+      </div>
+    );
+  }
+  if (snapshot?.onboarding?.completed === false) {
+    return (
+      <StudentOnboarding
+        user={user}
+        onCompleted={reload}
+        onLogout={onLogout}
+      />
+    );
+  }
+  if (snapshot?.onboarding?.completed && location.pathname === "/student/onboarding") {
+    return <Navigate to="/student" replace />;
+  }
 
   return (
     <div className="min-h-screen bg-[#f3f7fa] text-slate-800">
@@ -189,6 +210,15 @@ export default function StudentApp({
               path="activity/:activityId"
               element={<ActivityPlayer userId={user.id} onCompleted={reload} />}
             />
+            <RouterRoute
+              path="diagnostic-analysis"
+              element={
+                <DiagnosticAnalysisCompletion
+                  diagnostic={snapshot?.diagnostic}
+                  onCompleted={reload}
+                />
+              }
+            />
             <RouterRoute path="assessments" element={<PublishedAssessments />} />
             <RouterRoute
               path="mastery"
@@ -219,14 +249,277 @@ export default function StudentApp({
   );
 }
 
-function StudentOverview({ snapshot }: { snapshot: any }) {
+function StudentOnboarding({
+  user,
+  onCompleted,
+  onLogout,
+}: {
+  user: User;
+  onCompleted: () => Promise<void>;
+  onLogout: () => void;
+}) {
+  const [step, setStep] = useState<"welcome" | "introduction">("welcome");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const navigate = useNavigate();
+
+  async function finish() {
+    setSaving(true);
+    setError("");
+    try {
+      await post("/api/student/onboarding/complete");
+      await onCompleted();
+      navigate("/student", { replace: true });
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const stages = [
+    [ClipboardCheck, "Diagnostic evidence", "A 30-item multiple-choice assessment establishes your current baseline."],
+    [Brain, "Adaptive analysis", "NeuroLearn-X combines response evidence and your mental-effort rating to estimate mastery, gaps, and learning load."],
+    [Route, "Guided learning", "Your pathway prioritizes prerequisites and recommends the next suitable activity."],
+    [BookOpenCheck, "Mastery checks", "New evidence updates your dashboard and adapts the pathway as you progress."],
+  ] as const;
+
+  return (
+    <main className="min-h-screen bg-[#f3f7fa] px-5 py-8 sm:px-8">
+      <div className="mx-auto max-w-5xl">
+        <header className="flex items-center justify-between gap-4">
+          <Brand />
+          <button onClick={onLogout} className="btn-secondary">
+            <LogOut size={17} /> Sign out
+          </button>
+        </header>
+        <section className="mt-9 overflow-hidden rounded-3xl bg-white shadow-2xl">
+          <div className="grid lg:grid-cols-[0.72fr_1.28fr]">
+            <aside className="bg-navy-950 p-8 text-white sm:p-10">
+              <span className="grid h-14 w-14 place-items-center rounded-2xl bg-cyanx-500 text-navy-950">
+                {step === "welcome" ? <Sparkles size={28} /> : <Brain size={28} />}
+              </span>
+              <div className="mt-8 text-xs font-black uppercase tracking-[0.18em] text-cyanx-400">
+                {step === "welcome" ? "Welcome to NeuroLearn-X" : "Brief system introduction"}
+              </div>
+              <h1 className="mt-3 text-3xl font-black leading-tight sm:text-4xl">
+                {step === "welcome"
+                  ? `Hello, ${user.display_name.split(" ")[0]}.`
+                  : "Learn from evidence, one pathway at a time."}
+              </h1>
+              <p className="mt-4 text-sm leading-6 text-slate-300">
+                {step === "welcome"
+                  ? "Your account is ready. This short introduction appears only once and prepares you for your learning workspace."
+                  : "The system recommends learning support from assessment evidence. Its mastery and cognitive-load indicators support learning decisions; they are not medical diagnoses."}
+              </p>
+              <div className="mt-8 flex items-center gap-2" aria-label="Onboarding progress">
+                <span className="h-2 flex-1 rounded-full bg-cyanx-500" />
+                <span className={`h-2 flex-1 rounded-full ${step === "introduction" ? "bg-cyanx-500" : "bg-white/15"}`} />
+              </div>
+            </aside>
+            <div className="p-7 sm:p-10">
+              {error && <ErrorNotice message={error} onDismiss={() => setError("")} />}
+              {step === "welcome" ? (
+                <div className="flex min-h-[430px] flex-col justify-center">
+                  <Badge tone="cyan">Account registration complete</Badge>
+                  <h2 className="mt-5 text-3xl font-black tracking-tight text-navy-950">
+                    Your personalized learning journey starts here
+                  </h2>
+                  <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-500">
+                    You will first open the real Main Dashboard, then begin a 30-item diagnostic. NeuroLearn-X will use your responses to identify strengths and gaps before guiding you through targeted learning and mastery checks.
+                  </p>
+                  <button className="btn-primary mt-8 w-fit" onClick={() => setStep("introduction")}>
+                    Continue to system introduction <ArrowRight size={17} />
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <div className="text-xs font-black uppercase tracking-widest text-cyanx-600">How NeuroLearn-X works</div>
+                  <h2 className="mt-2 text-3xl font-black tracking-tight text-navy-950">From baseline evidence to adaptive support</h2>
+                  <div className="mt-7 grid gap-4 sm:grid-cols-2">
+                    {stages.map(([Icon, title, description], index) => (
+                      <article key={title} className="rounded-2xl border border-slate-100 bg-slate-50 p-5">
+                        <div className="flex items-center gap-3">
+                          <span className="grid h-10 w-10 place-items-center rounded-xl bg-navy-950 text-cyanx-400"><Icon size={20} /></span>
+                          <div className="text-xs font-black uppercase tracking-widest text-cyanx-600">Step {index + 1}</div>
+                        </div>
+                        <h3 className="mt-4 font-black text-navy-950">{title}</h3>
+                        <p className="mt-2 text-sm leading-6 text-slate-500">{description}</p>
+                      </article>
+                    ))}
+                  </div>
+                  <div className="mt-7 flex flex-wrap gap-3">
+                    <button className="btn-secondary" onClick={() => setStep("welcome")} disabled={saving}>
+                      <ArrowLeft size={17} /> Back
+                    </button>
+                    <button className="btn-primary" onClick={finish} disabled={saving}>
+                      {saving ? "Opening dashboard…" : "Open my Main Dashboard"} <ArrowRight size={17} />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function DiagnosticAnalysisCompletion({
+  diagnostic,
+  onCompleted,
+}: {
+  diagnostic: any;
+  onCompleted: () => Promise<void>;
+}) {
+  const navigate = useNavigate();
+  const attemptId = diagnostic?.pending_mental_effort_attempt_id;
+  if (!attemptId) return <Navigate to="/student" replace />;
+  return (
+    <MentalEffort
+      attemptId={attemptId}
+      boundaries={diagnostic.mental_effort_boundaries}
+      onSaved={async () => {
+        await onCompleted();
+        navigate("/student", { replace: true });
+      }}
+    />
+  );
+}
+
+function evidenceDate(value: string | null | undefined) {
+  return value ? new Date(value).toLocaleString() : "No valid evidence recorded yet";
+}
+
+function ExplainableMetricCard({
+  explanationId,
+  label,
+  value,
+  explanation,
+  icon,
+  tone = "navy",
+  expandedClassName = "sm:col-span-2 xl:col-span-4",
+  isOpen,
+  onOpen,
+  onClose,
+  children,
+}: {
+  explanationId: string;
+  label: string;
+  value: ReactNode;
+  explanation: any;
+  icon: ReactNode;
+  tone?: "navy" | "cyan" | "amber" | "rose" | "white";
+  expandedClassName?: string;
+  isOpen: boolean;
+  onOpen: () => void;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const tones = {
+    navy: "bg-navy-950 text-white",
+    cyan: "bg-cyanx-100 text-navy-950",
+    amber: "bg-amber-50 text-navy-950",
+    rose: "bg-rose-50 text-navy-950",
+    white: "bg-white text-navy-950",
+  };
+  const muted = tone === "navy" ? "text-slate-300" : "text-slate-600";
+  const panelId = `${explanationId}-explanation`;
+  return (
+    <article className={`${isOpen ? expandedClassName : ""} overflow-hidden rounded-2xl shadow-soft ${tones[tone]}`}>
+      <div className="flex min-h-44 flex-col p-5">
+        <div className="flex flex-1 items-start justify-between gap-4">
+          <div className="min-w-0">
+            <p className={`text-xs font-bold uppercase tracking-wider ${muted}`}>{label}</p>
+            <div className="mt-3 break-words text-2xl font-black tracking-tight">{value}</div>
+          </div>
+          <button
+            type="button"
+            onClick={onOpen}
+            aria-label={`How was ${label} determined?`}
+            aria-controls={panelId}
+            aria-expanded={isOpen}
+            className={`relative grid h-10 w-10 shrink-0 place-items-center rounded-xl transition hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyanx-400 ${tone === "navy" ? "bg-white/10 text-cyanx-400" : "bg-white text-cyanx-600"}`}
+          >
+            {icon}
+            <HelpCircle size={13} className="absolute -right-1 -top-1 rounded-full bg-white text-cyanx-700" aria-hidden="true" />
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={isOpen ? onClose : onOpen}
+          aria-controls={panelId}
+          aria-expanded={isOpen}
+          className={`mt-4 flex w-full items-center gap-2 border-t pt-3 text-left text-xs font-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyanx-400 ${tone === "navy" ? "border-white/10 text-cyanx-400" : "border-slate-200 text-cyanx-700"}`}
+        >
+          <HelpCircle size={15} /> How was this determined?
+          <ChevronRight size={15} className={`ml-auto transition ${isOpen ? "rotate-90" : ""}`} />
+        </button>
+      </div>
+      {isOpen && <div id={panelId} className="border-t border-slate-200 bg-white p-5 text-slate-700 sm:p-7">
+        <div className="mb-5 flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-black uppercase tracking-widest text-cyanx-600">Explanation</p>
+            <h2 className="mt-1 text-xl font-black text-navy-950">How {label} was determined</h2>
+          </div>
+          <button type="button" onClick={onClose} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm font-black text-navy-950 hover:bg-slate-50">
+            Close <X size={16} />
+          </button>
+        </div>
+        <div className="grid gap-5 lg:grid-cols-3">
+          <section className="rounded-xl bg-slate-50 p-4">
+            <h3 className="font-black text-navy-950">What this means</h3>
+            <p className="mt-2 text-sm leading-6">{explanation.meaning}</p>
+          </section>
+          <section className="rounded-xl bg-slate-50 p-4">
+            <h3 className="font-black text-navy-950">Why does this matter?</h3>
+            <p className="mt-2 text-sm leading-6">{explanation.why_matters}</p>
+          </section>
+          <section className="rounded-xl bg-cyan-50 p-4">
+            <h3 className="font-black text-navy-950">Simple interpretation</h3>
+            <p className="mt-2 text-sm leading-6 text-cyan-950">{explanation.interpretation}</p>
+          </section>
+        </div>
+        <section className="mt-5 rounded-xl border border-slate-200 p-4 sm:p-5">
+          <h3 className="font-black text-navy-950">Actual learner evidence, formula, variables, and calculation</h3>
+          <div className="mt-4">{children}</div>
+        </section>
+        <div className="mt-5 grid gap-5 lg:grid-cols-2">
+          <section className="rounded-xl bg-slate-50 p-4">
+            <h3 className="font-black text-navy-950">How does this affect my pathway?</h3>
+            <p className="mt-2 text-sm leading-6">{explanation.pathway_effect}</p>
+          </section>
+          <section className="rounded-xl bg-slate-50 p-4">
+            <h3 className="font-black text-navy-950">Evidence and data quality</h3>
+            <p className="mt-2 text-sm"><strong>Latest evidence date:</strong> {evidenceDate(explanation.latest_evidence_at)}</p>
+            <p className="mt-2 text-sm leading-6">{explanation.data_quality}</p>
+          </section>
+        </div>
+        {explanation.related_path && (
+          <Link to={explanation.related_path} className="mt-5 inline-flex items-center gap-1 text-sm font-black text-cyanx-700 hover:text-cyan-900">
+            Open related detailed page <ChevronRight size={16} />
+          </Link>
+        )}
+        <button type="button" onClick={onClose} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-navy-950 px-4 py-3 text-sm font-black text-white hover:bg-navy-900">
+          Hide explanation <X size={16} />
+        </button>
+      </div>}
+    </article>
+  );
+}
+
+export function StudentOverview({ snapshot }: { snapshot: any }) {
+  const [openExplanation, setOpenExplanation] = useState<string | null>(null);
   if (!snapshot) return <Loading label="Preparing your learning dashboard…" />;
   const pathway = snapshot.pathway;
-  const nextStep = pathway?.steps.find((step: any) => !step.completed_at);
-  const progress =
-    snapshot.progress.total > 0
-      ? snapshot.progress.completed / snapshot.progress.total
-      : 0;
+  const nextStep = pathway?.steps.find((step: any) => step.required && !step.completed_at);
+  const explainability = snapshot.explainability;
+  const masteryExplanation = explainability.average_mastery;
+  const loadExplanation = explainability.model_predicted_cognitive_load;
+  const targetExplanation = explainability.current_target;
+  const progressExplanation = explainability.pathway_progress;
+  const nextExplanation = explainability.next_recommended_step;
   return (
     <>
       <PageHeader
@@ -244,6 +537,98 @@ function StudentOverview({ snapshot }: { snapshot: any }) {
         }
       />
       {snapshot.student.is_demo && <DemoNotice />}
+      <section className="mt-6 overflow-hidden rounded-2xl bg-navy-950 text-white shadow-soft">
+        <div className="flex flex-col gap-6 p-6 sm:p-7 lg:flex-row lg:items-center lg:justify-between">
+          <div className="max-w-3xl flex-1">
+            <div className="text-xs font-black uppercase tracking-widest text-cyanx-400">
+              {snapshot.diagnostic?.completed ? "Personalized diagnostic results" : "Your first learning step"}
+            </div>
+            <h2 className="mt-2 text-2xl font-black">
+              {snapshot.diagnostic?.completed
+                ? `${Math.round((snapshot.diagnostic.latest_result?.accuracy || 0) * 100)}% baseline accuracy`
+                : "Baseline accuracy: Not assessed"}
+            </h2>
+            <p className="mt-2 text-sm text-slate-300">
+              <strong>Priority learning gaps:</strong>{" "}
+              {snapshot.diagnostic?.priority_gaps?.length
+                ? snapshot.diagnostic.priority_gaps.slice(0, 4).map((gap: any) => gap.concept).join(", ")
+                : "None recorded"}
+            </p>
+            <div className="mt-3 text-xs font-bold text-cyanx-400">
+              Reported cognitive load: {snapshot.diagnostic?.latest_result?.cognitive_load_category || "Not reported"}
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setOpenExplanation("diagnostic-results")}
+              aria-label="How were the personalized diagnostic results determined?"
+              aria-controls="diagnostic-results-explanation"
+              aria-expanded={openExplanation === "diagnostic-results"}
+              className="relative grid h-11 w-11 place-items-center rounded-xl bg-white/10 text-cyanx-400 transition hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyanx-400"
+            >
+              <ClipboardCheck size={20} />
+              <HelpCircle size={13} className="absolute -right-1 -top-1 rounded-full bg-white text-cyanx-700" aria-hidden="true" />
+            </button>
+            {snapshot.diagnostic?.pending_mental_effort_attempt_id && (
+              <Link to="/student/diagnostic-analysis" className="btn-secondary border-white/20 bg-white text-navy-950">
+                Complete AI analysis <Brain size={17} />
+              </Link>
+            )}
+            {snapshot.diagnostic?.available ? (
+              <Link to={`/student/activity/${snapshot.diagnostic.activity_id}`} className="btn-primary">
+                Start Diagnostic Assessment <ArrowRight size={17} />
+              </Link>
+            ) : (
+              <span className="rounded-xl border border-amber-300/30 bg-amber-400/10 px-4 py-3 text-sm font-bold text-amber-200">
+                Diagnostic setup unavailable
+              </span>
+            )}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setOpenExplanation(openExplanation === "diagnostic-results" ? null : "diagnostic-results")}
+          aria-controls="diagnostic-results-explanation"
+          aria-expanded={openExplanation === "diagnostic-results"}
+          className="flex w-full items-center gap-2 border-t border-white/10 px-6 py-4 text-left text-xs font-black text-cyanx-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyanx-400 sm:px-7"
+        >
+          <HelpCircle size={15} /> How was this determined?
+          <ChevronRight size={15} className={`ml-auto transition ${openExplanation === "diagnostic-results" ? "rotate-90" : ""}`} />
+        </button>
+        {openExplanation === "diagnostic-results" && (
+          <div id="diagnostic-results-explanation" className="border-t border-slate-200 bg-white p-5 text-slate-700 sm:p-7">
+            <div className="flex items-start justify-between gap-4">
+              <div><p className="text-xs font-black uppercase tracking-widest text-cyanx-600">Explanation</p><h2 className="mt-1 text-xl font-black text-navy-950">How the diagnostic results were determined</h2></div>
+              <button type="button" onClick={() => setOpenExplanation(null)} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm font-black text-navy-950 hover:bg-slate-50">Close <X size={16} /></button>
+            </div>
+            <div className="mt-5 grid gap-4 lg:grid-cols-3">
+              <section className="rounded-xl bg-slate-50 p-4"><h3 className="font-black text-navy-950">What this means</h3><p className="mt-2 text-sm leading-6">Baseline accuracy summarizes performance on the saved 30-item diagnostic assessment. Priority gaps are concepts with current mastery evidence below the configured threshold.</p></section>
+              <section className="rounded-xl bg-slate-50 p-4"><h3 className="font-black text-navy-950">Why it is important</h3><p className="mt-2 text-sm leading-6">The results give NeuroLearn-X its starting evidence for selecting targets, prerequisite support, and guided activities.</p></section>
+              <section className="rounded-xl bg-cyan-50 p-4"><h3 className="font-black text-navy-950">Simple interpretation</h3><p className="mt-2 text-sm leading-6 text-cyan-950">{snapshot.diagnostic?.completed ? `${Math.round(snapshot.diagnostic.latest_result.accuracy * 100)}% of the available diagnostic score was earned. ${snapshot.diagnostic.priority_gaps?.length || 0} priority gaps are currently listed.` : "No diagnostic attempt has been saved yet, so baseline accuracy and diagnostic gaps cannot be interpreted."}</p></section>
+            </div>
+            <section className="mt-5 rounded-xl border border-slate-200 p-4 sm:p-5">
+              <h3 className="font-black text-navy-950">Actual learner evidence, formula, variables, and step-by-step calculation</h3>
+              {snapshot.diagnostic?.completed ? <div className="mt-4 space-y-4 text-sm">
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs font-bold uppercase text-slate-400">Earned score</div><div className="mt-1 font-black text-navy-950">{snapshot.diagnostic.latest_result.score}</div></div>
+                  <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs font-bold uppercase text-slate-400">Maximum score</div><div className="mt-1 font-black text-navy-950">{snapshot.diagnostic.latest_result.max_score}</div></div>
+                  <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs font-bold uppercase text-slate-400">Item count</div><div className="mt-1 font-black text-navy-950">{snapshot.diagnostic.item_count}</div></div>
+                  <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs font-bold uppercase text-slate-400">Reported cognitive load</div><div className="mt-1 font-black text-navy-950">{snapshot.diagnostic.latest_result.cognitive_load_category || "Not reported"}</div></div>
+                </div>
+                <Equation latex={String.raw`A=\frac{S_e}{S_{\max}}\times100`} label="Baseline accuracy equals earned score divided by maximum score times one hundred" />
+                <p><strong>A</strong> is baseline accuracy, <strong>Sₑ</strong> is the learner's earned diagnostic score, and <strong>Smax</strong> is the maximum available score.</p>
+                <Equation latex={`A=\\frac{${snapshot.diagnostic.latest_result.score}}{${snapshot.diagnostic.latest_result.max_score}}\\times100=${(snapshot.diagnostic.latest_result.accuracy * 100).toFixed(1)}\\%`} label={`Baseline accuracy is ${(snapshot.diagnostic.latest_result.accuracy * 100).toFixed(1)} percent`} />
+                <ol className="list-decimal space-y-2 pl-5"><li>Read the saved earned and maximum scores from the latest diagnostic attempt.</li><li>Divide {snapshot.diagnostic.latest_result.score} by {snapshot.diagnostic.latest_result.max_score}.</li><li>Multiply by 100 to obtain {(snapshot.diagnostic.latest_result.accuracy * 100).toFixed(1)}% baseline accuracy.</li><li>List the current unresolved learning gaps ordered by their saved mastery evidence.</li></ol>
+                <div className="overflow-x-auto"><table className="data-table"><thead><tr><th>Priority learning gap</th><th>Current mastery evidence</th></tr></thead><tbody>{snapshot.diagnostic.priority_gaps?.map((gap: any) => <tr key={gap.concept_id}><td className="font-black text-navy-950">{gap.concept}</td><td>{(gap.mastery_score * 100).toFixed(1)}%</td></tr>)}</tbody></table></div>
+                <p className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-cyan-950"><strong>Reported cognitive load is separate from model prediction:</strong> this panel shows the learner's reported category, not the Model-Predicted Cognitive Load card result.</p>
+              </div> : <p className="mt-4 rounded-xl bg-amber-50 p-4 font-semibold text-amber-900">There is not enough saved diagnostic evidence to calculate baseline accuracy. Complete the 30-item assessment first.</p>}
+            </section>
+            <div className="mt-5 grid gap-4 lg:grid-cols-2"><section className="rounded-xl bg-slate-50 p-4"><h3 className="font-black text-navy-950">How this affects the adaptive pathway</h3><p className="mt-2 text-sm leading-6">Concept-level diagnostic evidence updates mastery and gaps, which the existing pathway logic uses when prioritizing guided learning activities.</p></section><section className="rounded-xl bg-slate-50 p-4"><h3 className="font-black text-navy-950">Latest evidence date</h3><p className="mt-2 text-sm">{evidenceDate(snapshot.diagnostic?.latest_result?.submitted_at)}</p></section></div>
+            <button type="button" onClick={() => setOpenExplanation(null)} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-navy-950 px-4 py-3 text-sm font-black text-white hover:bg-navy-900">Hide explanation <X size={16} /></button>
+          </div>
+        )}
+      </section>
       {snapshot.notifications?.map((notice: any) => (
         <section
           key={`${notice.title}-${notice.assigned_at}`}
@@ -263,105 +648,169 @@ function StudentOverview({ snapshot }: { snapshot: any }) {
         </section>
       ))}
       <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard
+        <ExplainableMetricCard
+          explanationId="current-target"
           label="Current target"
-          value={snapshot.target?.name || "Choose one"}
-          detail={snapshot.target?.code || "No physics competency selected"}
+          value={targetExplanation.available ? targetExplanation.concept.name : "Not selected"}
+          explanation={targetExplanation}
           icon={<Target size={20} />}
-        />
-        <MetricCard
+          isOpen={openExplanation === "current-target"}
+          onOpen={() => setOpenExplanation("current-target")}
+          onClose={() => setOpenExplanation(null)}
+        >
+          {targetExplanation.available ? (
+            <div className="space-y-5 text-sm">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div><div className="text-xs font-bold uppercase text-slate-400">Target concept</div><div className="mt-1 font-black text-navy-950">{targetExplanation.concept.name}</div></div>
+                <div><div className="text-xs font-bold uppercase text-slate-400">Current mastery</div><div className="mt-1 font-black text-navy-950">{targetExplanation.mastery == null ? "Not yet assessed" : `${(targetExplanation.mastery * 100).toFixed(1)}%`}</div></div>
+                <div><div className="text-xs font-bold uppercase text-slate-400">Mastery threshold</div><div className="mt-1 font-black text-navy-950">{(targetExplanation.threshold * 100).toFixed(1)}%</div></div>
+                <div><div className="text-xs font-bold uppercase text-slate-400">Detected learning gap</div><div className="mt-1 font-black text-navy-950">{targetExplanation.detected_gap ? "Yes" : "No current gap"}</div></div>
+              </div>
+              <Equation latex={String.raw`M_i < \tau`} label="Concept mastery is below the configured threshold" />
+              <p><strong>Mᵢ</strong> is the learner's current mastery for the target concept, and <strong>τ</strong> is the configured mastery threshold.</p>
+              {targetExplanation.mastery != null && <Equation latex={`${targetExplanation.mastery.toFixed(3)} ${targetExplanation.detected_gap ? "<" : "\\ge"} ${targetExplanation.threshold.toFixed(3)}`} label={`Current mastery ${targetExplanation.mastery.toFixed(3)} compared with threshold ${targetExplanation.threshold.toFixed(3)}`} />}
+              <ol className="list-decimal space-y-2 pl-5"><li>Read the learner's saved target concept and latest valid mastery evidence.</li><li>Compare current mastery Mᵢ with threshold τ.</li><li>Check unresolved gaps and direct prerequisite evidence.</li><li>Keep or update the active target using the existing pathway rules.</li></ol>
+              <div>
+                <h4 className="font-black text-navy-950">Required prerequisites from the knowledge graph</h4>
+                <ul className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {targetExplanation.prerequisites.map((item: any) => <li key={item.concept_id} className="rounded-lg bg-slate-50 p-3"><strong>{item.concept}</strong> · {item.mastery == null ? "not yet assessed" : `${(item.mastery * 100).toFixed(1)}% mastery`} · {item.below_threshold ? "needs pathway evidence" : "threshold met"}</li>)}
+                  {!targetExplanation.prerequisites.length && <li className="rounded-lg bg-slate-50 p-3">No direct prerequisite is recorded for this target.</li>}
+                </ul>
+              </div>
+              <p className="rounded-xl bg-cyan-50 p-4 leading-6 text-cyan-950"><strong>Why this target:</strong> {targetExplanation.reason}</p>
+            </div>
+          ) : <p className="rounded-xl bg-amber-50 p-4 font-semibold text-amber-900">{targetExplanation.data_quality}</p>}
+        </ExplainableMetricCard>
+        <ExplainableMetricCard
+          explanationId="average-mastery"
           label="Average mastery"
           value={
-            snapshot.mastery_average == null
-              ? "—"
-              : `${Math.round(snapshot.mastery_average * 100)}%`
+            masteryExplanation.available
+              ? `${(masteryExplanation.value * 100).toFixed(1)}%`
+              : "Not available yet"
           }
-          detail={`${snapshot.mastery.length} concepts assessed`}
+          explanation={masteryExplanation}
           icon={<Gauge size={20} />}
           tone="cyan"
-        />
-        <MetricCard
-          label="Predicted load"
-          value={pathway?.cognitive_load_category || "Not estimated"}
-          detail={
-            pathway
-              ? `Expected index ${pathway.predicted_cognitive_load.toFixed(2)}`
-              : "Select a target to generate"
-          }
+          isOpen={openExplanation === "average-mastery"}
+          onOpen={() => setOpenExplanation("average-mastery")}
+          onClose={() => setOpenExplanation(null)}
+        >
+          {masteryExplanation.available ? (
+            <div className="space-y-5 text-sm">
+              <p><strong>Actual data used:</strong> the latest valid mastery record for each of {masteryExplanation.concept_count} assessed concepts. Each concept record comes from saved item scores; the dashboard then averages those current concept results.</p>
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div><h4 className="font-black text-navy-950">Concept mastery</h4><Equation latex={String.raw`M_i=\frac{S_{e,i}}{S_{\max,i}}`} label="Mastery for concept i equals earned score divided by maximum score" /><dl className="space-y-1 text-xs"><div><dt className="inline font-black">Sₑ,ᵢ:</dt> <dd className="inline">earned score for concept i</dd></div><div><dt className="inline font-black">Smax,ᵢ:</dt> <dd className="inline">highest possible score for concept i</dd></div><div><dt className="inline font-black">Mᵢ:</dt> <dd className="inline">mastery for concept i</dd></div></dl></div>
+                <div><h4 className="font-black text-navy-950">Dashboard average</h4><Equation latex={String.raw`\overline{M}=\frac{1}{n}\sum_{i=1}^{n}M_i`} label="Average mastery equals the sum of concept mastery divided by the number of concepts" /><Equation latex={`\\overline{M}=\\frac{${masteryExplanation.sum_mastery.toFixed(3)}}{${masteryExplanation.concept_count}}=${masteryExplanation.value.toFixed(3)}`} label={`Average mastery equals ${masteryExplanation.value.toFixed(3)}`} /><p className="text-xs"><strong>n:</strong> {masteryExplanation.concept_count} concepts with valid evidence. <strong>Average:</strong> {(masteryExplanation.value * 100).toFixed(1)}%.</p></div>
+              </div>
+              <div className="overflow-x-auto"><table className="data-table"><thead><tr><th>Concept</th><th>Actual score evidence</th><th>Current mastery</th><th>Threshold result</th><th>Latest evidence</th></tr></thead><tbody>{masteryExplanation.concepts.map((item: any) => <tr key={item.concept_id}><td className="font-black text-navy-950">{item.concept}</td><td>{item.attempts.length ? item.attempts.map((attempt: any) => `${attempt.earned}/${attempt.maximum}`).join(", ") : "No score rows"}{item.calculation_mode === "weighted" && item.attempts.length > 1 ? " · later attempts weighted more" : ""}</td><td>{(item.score * 100).toFixed(1)}%</td><td>{item.below_threshold ? `Below ${(masteryExplanation.threshold * 100).toFixed(0)}% — possible learning gap` : "Threshold met"}</td><td>{evidenceDate(item.latest_evidence_at)}</td></tr>)}</tbody></table></div>
+              <Equation latex={String.raw`M_i < \tau`} label="A possible learning gap is identified when concept mastery is below threshold tau" />
+              <ol className="list-decimal space-y-2 pl-5"><li>Calculate each concept mastery from its valid saved score evidence.</li><li>Use the latest current mastery record for each assessed concept.</li><li>Sum the {masteryExplanation.concept_count} concept mastery values.</li><li>Divide {masteryExplanation.sum_mastery.toFixed(3)} by {masteryExplanation.concept_count} to obtain {(masteryExplanation.value * 100).toFixed(1)}%.</li></ol>
+            </div>
+          ) : <p className="rounded-xl bg-amber-50 p-4 font-semibold text-amber-900">{masteryExplanation.data_quality}</p>}
+        </ExplainableMetricCard>
+        <ExplainableMetricCard
+          explanationId="model-predicted-load"
+          label="Model-Predicted Cognitive Load"
+          value={loadExplanation.available ? loadExplanation.category : "Not available yet"}
+          explanation={loadExplanation}
           icon={<Brain size={20} />}
           tone="amber"
-        />
-        <MetricCard
+          isOpen={openExplanation === "model-predicted-load"}
+          onOpen={() => setOpenExplanation("model-predicted-load")}
+          onClose={() => setOpenExplanation(null)}
+        >
+          {loadExplanation.available ? (
+            <div className="space-y-5 text-sm">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                {(["Low", "Moderate", "High"] as const).map((label) => <div key={label} className="rounded-xl bg-slate-50 p-3"><div className="text-xs font-bold uppercase text-slate-400">{label} probability</div><div className="mt-1 text-lg font-black text-navy-950">{(loadExplanation.probabilities[label] * 100).toFixed(1)}%</div></div>)}
+                <div className="rounded-xl bg-cyan-50 p-3"><div className="text-xs font-bold uppercase text-slate-400">Confidence</div><div className="mt-1 text-lg font-black text-navy-950">{(loadExplanation.confidence * 100).toFixed(1)}%</div></div>
+                <div className="rounded-xl bg-cyan-50 p-3"><div className="text-xs font-bold uppercase text-slate-400">Load index</div><div className="mt-1 text-lg font-black text-navy-950">{loadExplanation.index.toFixed(3)}</div></div>
+              </div>
+              <section><h4 className="font-black text-navy-950">Actual learner evidence used</h4><dl className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{[
+                ["Accuracy", `${(loadExplanation.evidence.accuracy * 100).toFixed(1)}%`],
+                ["Average response time", `${loadExplanation.evidence.average_response_seconds.toFixed(1)} seconds`],
+                ["Completion time", `${(loadExplanation.evidence.completion_seconds / 60).toFixed(1)} minutes`],
+                ["Number of attempts", loadExplanation.evidence.attempts],
+                ["Skipped questions", loadExplanation.evidence.skipped_questions],
+                ["Hint usage", loadExplanation.evidence.hint_usage],
+                ["Reported mental effort", loadExplanation.evidence.mental_effort_rating == null ? "Not reported" : `${loadExplanation.evidence.mental_effort_rating}/9`],
+                ["Model version", loadExplanation.model_version],
+              ].map(([name, value]) => <div key={String(name)} className="rounded-lg bg-slate-50 p-3"><dt className="text-xs font-bold uppercase text-slate-400">{name}</dt><dd className="mt-1 font-black text-navy-950">{value}</dd></div>)}</dl></section>
+              <div className="grid gap-5 lg:grid-cols-2">
+                <div><h4 className="font-black text-navy-950">Ensemble prediction</h4><Equation latex={String.raw`p_c=\frac{1}{K}\sum_{k=1}^{K}p_{kc}`} label="Probability for a category equals the average probability from K classifiers" /><Equation latex={String.raw`\hat{c}=\operatorname*{arg\,max}_{c}p_c`} label="The predicted category is the category with maximum probability" /><p className="text-xs">K = {loadExplanation.model_count} trained ensemble members. The largest final probability selects {loadExplanation.category}.</p></div>
+                <div><h4 className="font-black text-navy-950">Cognitive-Load Index</h4><Equation latex={String.raw`CL=0P_L+0.5P_M+1P_H`} label="Cognitive load index weights low moderate and high probabilities" /><Equation latex={`CL=0(${loadExplanation.probabilities.Low.toFixed(3)})+0.5(${loadExplanation.probabilities.Moderate.toFixed(3)})+1(${loadExplanation.probabilities.High.toFixed(3)})=${loadExplanation.index.toFixed(3)}`} label={`Cognitive load index equals ${loadExplanation.index.toFixed(3)}`} /></div>
+              </div>
+              <ol className="list-decimal space-y-2 pl-5"><li>Read the saved learner evidence shown above.</li><li>Obtain each ensemble member's Low, Moderate, and High probabilities.</li><li>Average the probabilities across K = {loadExplanation.model_count} members.</li><li>Select the largest probability and calculate the weighted load index.</li></ol>
+              <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4"><h4 className="font-black text-cyan-950">Learner-reported mental effort — separate measure</h4><p className="mt-2 text-cyan-900">{loadExplanation.reported_mental_effort ? `You reported ${loadExplanation.reported_mental_effort.rating}/9 (${loadExplanation.reported_mental_effort.category}) on ${evidenceDate(loadExplanation.reported_mental_effort.reported_at)}. This is an input to the model, not the model prediction itself.` : "No mental-effort rating has been reported yet."}</p></div>
+              <p className="rounded-xl bg-amber-50 p-4 font-semibold text-amber-900">{loadExplanation.disclaimer}</p>
+            </div>
+          ) : (
+            <div className="space-y-3"><p className="rounded-xl bg-amber-50 p-4 font-semibold text-amber-900">{loadExplanation.data_quality}</p><p className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-cyan-950"><strong>Reported mental effort remains separate:</strong> {loadExplanation.reported_mental_effort ? `${loadExplanation.reported_mental_effort.rating}/9 (${loadExplanation.reported_mental_effort.category}), reported ${evidenceDate(loadExplanation.reported_mental_effort.reported_at)}.` : "No learner rating is available."}</p></div>
+          )}
+        </ExplainableMetricCard>
+        <ExplainableMetricCard
+          explanationId="pathway-progress"
           label="Pathway progress"
-          value={`${snapshot.progress.completed}/${snapshot.progress.total}`}
-          detail={
-            pathway
-              ? `${Math.max(0, pathway.total_minutes - (snapshot.progress.completed * pathway.total_minutes) / Math.max(1, snapshot.progress.total)).toFixed(0)} min estimated remaining`
-              : "No active pathway"
-          }
+          value={progressExplanation.available ? `${(progressExplanation.percentage * 100).toFixed(1)}%` : "No active pathway"}
+          explanation={progressExplanation}
           icon={<ListChecks size={20} />}
           tone="rose"
-        />
+          isOpen={openExplanation === "pathway-progress"}
+          onOpen={() => setOpenExplanation("pathway-progress")}
+          onClose={() => setOpenExplanation(null)}
+        >
+          {progressExplanation.available ? (
+            <div className="space-y-5 text-sm">
+              <Equation latex={String.raw`PP=\frac{N_c}{N_t}\times100`} label="Pathway progress equals completed required activities divided by total required activities times one hundred" />
+              <Equation latex={`PP=\\frac{${progressExplanation.completed}}{${progressExplanation.total}}\\times100=${(progressExplanation.percentage * 100).toFixed(1)}\\%`} label={`Pathway progress is ${(progressExplanation.percentage * 100).toFixed(1)} percent`} />
+              <p><strong>Nc:</strong> {progressExplanation.completed} successfully completed required activities. <strong>Nt:</strong> {progressExplanation.total} total required activities. <strong>Remaining:</strong> {progressExplanation.remaining}.</p>
+              <ol className="list-decimal space-y-2 pl-5"><li>Count required activities with valid completion records: {progressExplanation.completed}.</li><li>Count all required activities in the active pathway: {progressExplanation.total}.</li><li>Divide the completed count by the total count.</li><li>Multiply by 100 to obtain {(progressExplanation.percentage * 100).toFixed(1)}%.</li></ol>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{progressExplanation.steps.map((step: any) => <div key={`${step.activity}-${step.concept}`} className="rounded-xl bg-slate-50 p-3"><Badge tone={step.status === "Completed" ? "green" : step.status === "Current" ? "cyan" : "slate"}>{step.status}</Badge><div className="mt-2 font-black text-navy-950">{step.activity}</div><div className="mt-1 text-xs text-slate-500">{step.concept}</div></div>)}</div>
+            </div>
+          ) : <p className="rounded-xl bg-amber-50 p-4 font-semibold text-amber-900">{progressExplanation.data_quality}</p>}
+        </ExplainableMetricCard>
       </div>
       <div className="mt-6 grid gap-6 xl:grid-cols-[1.35fr_0.65fr]">
-        <section className="rounded-2xl bg-white p-6 shadow-soft">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <p className="text-xs font-bold uppercase tracking-widest text-cyanx-600">
-                Next recommended step
-              </p>
-              <h2 className="mt-1 text-xl font-black text-navy-950">
-                {nextStep?.activity || "Select a target competency"}
-              </h2>
-            </div>
-            <span className="grid h-12 w-12 place-items-center rounded-xl bg-navy-950 text-cyanx-400">
-              <BookOpenCheck size={23} />
-            </span>
-          </div>
-          {nextStep ? (
-            <>
-              <div className="mt-5 grid gap-3 rounded-xl bg-slate-50 p-4 sm:grid-cols-3">
-                <div>
-                  <div className="text-xs text-slate-500">Concept</div>
-                  <div className="mt-1 text-sm font-bold text-navy-950">
-                    {nextStep.concept}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-xs text-slate-500">Estimated time</div>
-                  <div className="mt-1 text-sm font-bold text-navy-950">
-                    {nextStep.estimated_minutes} minutes
-                  </div>
-                </div>
-                <div>
-                  <div className="text-xs text-slate-500">Expected load</div>
-                  <div className="mt-1 text-sm font-bold text-navy-950">
-                    {nextStep.predicted_load_index.toFixed(2)} / 1.00
-                  </div>
-                </div>
-              </div>
-              <div className="mt-5">
-                <ProgressBar value={progress} label="Active pathway completion" />
-              </div>
-              <Link
-                to={`/student/activity/${nextStep.activity_id}`}
-                className="btn-primary mt-5 inline-flex"
-              >
-                Begin next activity <ArrowRight size={17} />
-              </Link>
-            </>
-          ) : (
-            <Empty
-              title="Your pathway will appear here"
-              description="Choose a General Physics target to begin diagnosis and recommendation."
-              action={
-                <Link to="/student/targets" className="btn-primary inline-flex">
-                  Choose target <ChevronRight size={17} />
-                </Link>
-              }
-            />
-          )}
-        </section>
+        <ExplainableMetricCard
+          explanationId="next-recommended-step"
+          label="Next recommended step"
+          value={nextStep?.activity || "Select a target competency"}
+          explanation={nextExplanation}
+          icon={<BookOpenCheck size={23} />}
+          tone="white"
+          expandedClassName=""
+          isOpen={openExplanation === "next-recommended-step"}
+          onOpen={() => setOpenExplanation("next-recommended-step")}
+          onClose={() => setOpenExplanation(null)}
+        >
+          {nextStep ? <div className="space-y-5 text-sm">
+            <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                ["Recommended activity", nextExplanation.activity],
+                ["Concept addressed", nextExplanation.concept],
+                ["Learning gap addressed", nextExplanation.learning_gap ? `${nextExplanation.learning_gap.concept}: ${(nextExplanation.learning_gap.mastery * 100).toFixed(1)}% vs ${(nextExplanation.learning_gap.threshold * 100).toFixed(1)}% threshold` : "No unresolved gap for this concept"],
+                ["Required prerequisite", nextExplanation.prerequisites.join(", ") || "No direct prerequisite"],
+                ["Estimated time", `${nextExplanation.estimated_minutes} minutes`],
+                ["Expected difficulty", nextExplanation.difficulty],
+                ["Predicted activity-load index", nextExplanation.predicted_load_index.toFixed(3)],
+                ["Latest selection evidence", evidenceDate(nextExplanation.latest_evidence_at)],
+              ].map(([name, value]) => <div key={String(name)} className="rounded-lg bg-slate-50 p-3"><dt className="text-xs font-bold uppercase text-slate-400">{name}</dt><dd className="mt-1 font-black text-navy-950">{value}</dd></div>)}
+            </dl>
+            <section className="rounded-xl border border-slate-200 p-4">
+              <h4 className="font-black text-navy-950">Step-by-step activity selection</h4>
+              <Equation latex={String.raw`APS=\alpha GC+\beta(1-PCL)+\gamma(1-NLT)`} label="Adaptive Pathway Score balances gap coverage predicted cognitive load and normalized learning time" />
+              <p className="leading-6"><strong>GC</strong> is gap coverage; <strong>PCL</strong> is predicted cognitive load; <strong>NLT</strong> is normalized learning time; and <strong>α, β, γ</strong> are the configured weights.</p>
+              {nextExplanation.aps.available ? <div className="mt-4 space-y-3">
+                <Equation latex={`${nextExplanation.aps.weights.alpha.toFixed(2)}(${nextExplanation.aps.gap_coverage.toFixed(3)})+${nextExplanation.aps.weights.beta.toFixed(2)}(1-${nextExplanation.aps.predicted_cognitive_load.toFixed(3)})+${nextExplanation.aps.weights.gamma.toFixed(2)}(1-${nextExplanation.aps.normalized_learning_time.toFixed(3)})=${nextExplanation.aps.score.toFixed(3)}`} label={`Adaptive Pathway Score equals ${nextExplanation.aps.score.toFixed(3)}`} />
+                <ol className="list-decimal space-y-2 pl-5"><li>Measure how well each valid pathway covers the saved learning gaps.</li><li>Adjust for predicted load and normalized learning time.</li><li>Apply the configured APS weights and compare valid alternatives.</li><li>Select the highest valid score: {nextExplanation.aps.score.toFixed(3)}.</li></ol>
+                <p className="rounded-lg bg-cyan-50 p-3 text-cyan-950">{nextExplanation.aps.selection_reason}</p>
+                {!!nextExplanation.aps.alternatives.length && <div><h4 className="font-black text-navy-950">Why other valid choices ranked lower</h4><ul className="mt-2 space-y-2">{nextExplanation.aps.alternatives.map((item: any) => <li key={item.label} className="rounded-lg bg-slate-50 p-3"><strong>{item.label}</strong> · APS {item.adaptive_pathway_score.toFixed(3)} · {item.why_not_selected}</li>)}</ul></div>}
+              </div> : <p className="mt-4 rounded-lg bg-amber-50 p-3 font-semibold text-amber-900">{nextExplanation.aps.reason}</p>}
+            </section>
+            <div className="flex flex-wrap items-center gap-3"><Link to={`/student/activity/${nextStep.activity_id}`} className="btn-primary inline-flex">Begin next activity <ArrowRight size={17} /></Link><Link to={nextExplanation.related_path} className="inline-flex items-center gap-1 font-black text-cyanx-700">Open pathway details <ChevronRight size={16} /></Link></div>
+          </div> : <div className="space-y-4"><p className="rounded-xl bg-amber-50 p-4 font-semibold text-amber-900">{nextExplanation.data_quality}</p><Link to="/student/targets" className="btn-primary inline-flex">Choose target <ChevronRight size={17} /></Link></div>}
+        </ExplainableMetricCard>
         <section className="rounded-2xl bg-white p-6 shadow-soft">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-black text-navy-950">Learning gaps</h2>
@@ -695,7 +1144,7 @@ function AdaptiveTutor({ activity, onCompleted }: { activity: any; onCompleted: 
   if (error && !session) return <ErrorNotice message={error} onDismiss={() => setError("")} />;
   if (!session) return <Loading label="Preparing adaptive practice..." />;
   if (result && !effortSaved) {
-    return <MentalEffort attemptId={result.attempt_id} boundaries={result.mental_effort_boundaries} onSaved={() => setEffortSaved(true)} />;
+    return <MentalEffort attemptId={result.attempt_id} boundaries={result.mental_effort_boundaries} onSaved={() => { setEffortSaved(true); onCompleted(); }} />;
   }
   if (result && effortSaved) {
     const summary = result.summary || {};
@@ -1052,7 +1501,10 @@ function ActivityPlayer({
       <MentalEffort
         attemptId={result.attempt_id}
         boundaries={result.mental_effort_boundaries}
-        onSaved={() => setEffortSaved(true)}
+        onSaved={() => {
+          setEffortSaved(true);
+          onCompleted();
+        }}
       />
     );
   }

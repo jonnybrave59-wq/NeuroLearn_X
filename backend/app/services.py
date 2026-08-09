@@ -592,7 +592,13 @@ def generate_pathways(
     trigger_type: str = "Evidence refresh",
     trigger_id: int | None = None,
 ) -> list[PathwayRecommendation]:
-    profile = db.scalar(select(StudentProfile).where(StudentProfile.user_id == student.id))
+    # Serialize pathway decisions for one learner so simultaneous evidence
+    # updates cannot leave competing active recommendations in PostgreSQL.
+    profile = db.scalar(
+        select(StudentProfile)
+        .where(StudentProfile.user_id == student.id)
+        .with_for_update()
+    )
     if not profile or not profile.target_concept_id:
         return []
     previous_selected = db.scalar(
@@ -744,9 +750,8 @@ def generate_pathways(
     improvement = expected_mastery_improvement(
         db, student.id, missing_or_unmastered
     )
-    standard = next(item for item in ranked if item.label == "Standard pathway")
-    selected_label = performance_mode(db, evidence, standard.predicted_load)
-    best = next(item for item in ranked if item.label == selected_label)
+    selected_label = ranked[0].label
+    best = ranked[0]
     best_activity = db.get(Activity, best.activity_ids[0])
     best_concept = db.get(Concept, best.concept_ids[0])
     feature_details[best.label][str(best_activity.id)] = predict_activity_load(
@@ -755,7 +760,7 @@ def generate_pathways(
         best_activity,
         best_concept.id,
         best_concept.difficulty,
-        explain=True,
+        explain=trigger_type != "Optimization settings updated",
     )
     for old in db.scalars(
         select(PathwayRecommendation).where(
@@ -770,7 +775,7 @@ def generate_pathways(
         concept_id: db.get(Concept, concept_id).name for concept_id in missing_or_unmastered
     }
     records: list[PathwayRecommendation] = []
-    selected_candidate = next(item for item in ranked if item.label == selected_label)
+    selected_candidate = ranked[0]
     alternative_details = [
         {
             "label": item.label,
@@ -779,7 +784,7 @@ def generate_pathways(
             "predicted_cognitive_load": item.predicted_load,
             "total_minutes": item.total_minutes,
             "why_not_selected": (
-                "It did not match the configured support level for the learner's current mastery, error, effort, and interaction evidence."
+                "Its APS ranked below the selected candidate after applying gap coverage, cognitive load, learning time, and the documented tie-breaker."
                 if item.label != selected_label
                 else "Selected"
             ),
@@ -821,7 +826,7 @@ def generate_pathways(
             f"{evidence['attempts']} attempt(s), {evidence['skips']} skip(s), "
             f"{evidence['hints']} hint(s), {evidence['effort_category']} effort, "
             f"and mastery trend {evidence['mastery_trend']:+.0%}. "
-            f"{selected_label} was selected by the teacher-configurable performance boundaries."
+            f"{selected_label} was selected because it has the highest valid APS."
         )
         target_mastery = mastery.get(target.id)
         focus_id = missing_or_unmastered[0]
@@ -857,9 +862,9 @@ def generate_pathways(
             "confidence": {"level": confidence, "criteria": confidence_reasons},
             "expected_improvement": improvement,
             "selection_reason": (
-                f"{selected_label} was selected because the configured performance boundaries matched the learner evidence; its APS is {selected_candidate.score:.3f}."
+                f"{selected_label} was selected because it has the highest APS ({selected_candidate.score:.3f}); ties use greater gap coverage, lower cognitive load, then shorter time."
                 if candidate.label == selected_label
-                else f"This candidate remains available for comparison but {selected_label} matched the current support boundary."
+                else f"This candidate was rejected because its APS ranked below {selected_label}; ties use greater gap coverage, lower cognitive load, then shorter time."
             ),
             "alternatives_not_selected": alternative_details,
             "formula": "APS = alpha(gap coverage) + beta(1 - cognitive load) + gamma(1 - normalized time)",
@@ -1135,6 +1140,7 @@ def serialize_pathway(db: Session, pathway: PathwayRecommendation) -> dict[str, 
                 "activity_id": step.activity_id,
                 "activity": db.get(Activity, step.activity_id).title,
                 "activity_type": db.get(Activity, step.activity_id).activity_type,
+                "difficulty": db.get(Activity, step.activity_id).difficulty,
                 "estimated_minutes": db.get(Activity, step.activity_id).estimated_minutes,
                 "predicted_load_index": step.predicted_load_index,
                 "completed_at": step.completed_at,

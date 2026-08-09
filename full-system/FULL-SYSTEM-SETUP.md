@@ -37,7 +37,11 @@ cd backend
 python -m alembic upgrade head
 ```
 
-Seed demo data only on the initial demonstration deployment:
+Import the preserved SQLite dataset into a new empty PostgreSQL database before
+the first public start. Do not seed or replace production research records.
+The guarded copier is included in `scripts/migrate_sqlite_to_postgres.py`.
+
+Synthetic demo data may be seeded only for a separate disposable deployment:
 
 ```bash
 python -m app.seed
@@ -54,11 +58,17 @@ every placeholder. Do not put real secrets in the ZIP or source control.
 - `APP_ENV=production`
 - `DATABASE_URL`: persistent PostgreSQL URL
 - `SECRET_KEY`: random value of at least 32 characters
+- `PRODUCTION_TEACHER_PASSWORD`: strong provider-managed teacher secret
+- `PRODUCTION_DEMO_STUDENT_PASSWORD`: separate strong demo-student secret
 - `COOKIE_SECURE=1`
 - `COOKIE_SAMESITE=lax` for the bundled same-origin web deployment
 - `PUBLIC_APP_URL`: final clean HTTPS application origin
 - `ALLOWED_ORIGINS`: exact approved HTTPS frontend origins
 - `CREATE_TABLES_ON_STARTUP=0`
+- `SEED_DEMO_IF_EMPTY=0` and `SEED_DEMO_ON_STARTUP=0`
+
+Question Studio requires `AI_PROVIDER`, `AI_MODEL`, `AI_API_KEY`, and an HTTPS
+`AI_BASE_URL`. Store the credential only in the deployment secret manager.
 
 Use `COOKIE_SAMESITE=none` only when an explicitly approved cross-origin client
 is enabled. Credentialed CORS never uses `*`.
@@ -96,7 +106,7 @@ network-only and are never stored by the service worker.
 
 ## Verification checklist
 
-1. Confirm `/api/health` reports `NeuroLearn-X API` and version `1.3.0`.
+1. Confirm `/api/health` reports `NeuroLearn-X API` and version `1.3.1`.
 2. Sign in as Student and Teacher.
 3. Open an assessment and save a response with a mental-effort rating.
 4. Confirm mastery and the intelligent pathway update.

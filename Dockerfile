@@ -8,6 +8,7 @@ COPY frontend/ ./
 # explicit HTTPS API origin when it creates the native bundle.
 ENV VITE_API_BASE_URL="" \
     VITE_PUBLIC_APP_URL="" \
+    VITE_SHOW_DEMO_CREDENTIALS="false" \
     VITE_SOURCE_AVAILABLE="true" \
     VITE_APK_AVAILABLE="false" \
     VITE_WINDOWS_PACKAGE_AVAILABLE="false"
@@ -28,8 +29,12 @@ COPY release/NeuroLearn-X-Source-Code.zip /app/release/NeuroLearn-X-Source-Code.
 COPY release/NeuroLearn-X-Source-Code.zip.sha256 /app/release/NeuroLearn-X-Source-Code.zip.sha256
 COPY scripts/validate_deployment.py /app/scripts/validate_deployment.py
 COPY full-system/docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh
+RUN useradd --create-home --shell /usr/sbin/nologin neurolearnx \
+    && mkdir -p /app/backend/models \
+    && chown -R neurolearnx:neurolearnx /app/backend/models \
+    && chmod +x /app/docker-entrypoint.sh
 
 WORKDIR /app/backend
 EXPOSE 10000
+USER neurolearnx
 CMD ["/app/docker-entrypoint.sh"]

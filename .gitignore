@@ -18,3 +18,8 @@ frontend/playwright-report/
 NeuroLearn-X-HTML-App/
 verification/
 tmp/
+
+.vercel
+.env*
+!.env.example
+!full-system/.env.production.example

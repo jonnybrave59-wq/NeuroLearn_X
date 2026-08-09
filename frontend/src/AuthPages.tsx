@@ -12,12 +12,17 @@ import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { inlineApiError, post } from "./api";
 import { Brand, ErrorNotice } from "./components";
+import { cacheAuthenticatedUser } from "./offline";
 
 function messageOf(error: unknown) {
   return inlineApiError(error);
 }
 
-export function StudentRegistrationPage() {
+export function StudentRegistrationPage({
+  onRegistered,
+}: {
+  onRegistered?: (user: any) => void;
+}) {
   const navigate = useNavigate();
   const [form, setForm] = useState({
     student_id: "",
@@ -58,8 +63,15 @@ export function StudentRegistrationPage() {
           section: form.section || null,
         },
       );
-      setSuccess(result.message);
-      window.setTimeout(() => navigate("/login/student"), 1800);
+      setSuccess(`${result.message} Opening your welcome…`);
+      const user = await post<any>("/api/auth/login", {
+        participant_code: form.student_id,
+        password: form.password,
+        expected_role: "student",
+      });
+      await cacheAuthenticatedUser(user);
+      onRegistered?.(user);
+      navigate("/student/onboarding", { replace: true });
     } catch (cause) {
       setError(messageOf(cause));
     } finally {

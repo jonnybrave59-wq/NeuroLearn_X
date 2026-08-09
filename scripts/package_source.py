@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / "release"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 ARCHIVE = RELEASE / f"NeuroLearn-X-Source-v{VERSION}.zip"
 SOURCE_CODE_ARCHIVE = RELEASE / "NeuroLearn-X-Source-Code.zip"
 
@@ -106,15 +106,20 @@ def validate(paths: list[Path]):
         "backend/app/seed.py",
         "backend/app/seed_if_empty.py",
         "backend/app/tutoring.py",
+        "backend/app/production_accounts.py",
         "backend/alembic/versions/0001_initial.py",
         "backend/alembic/versions/0002_accounts_authoring.py",
         "backend/alembic/versions/0003_adaptive_learning.py",
         "backend/alembic/versions/0004_intelligent_tutoring.py",
         "backend/alembic/versions/0005_model_artifact.py",
+        "backend/alembic/versions/0006_teacher_refinement_evidence.py",
+        "backend/alembic/versions/0007_learner_onboarding.py",
+        "backend/alembic/versions/0008_production_hardening.py",
         "backend/tests/test_api.py",
         "backend/tests/test_extended_features.py",
         "backend/tests/test_revision_features.py",
         "backend/tests/test_production_security.py",
+        "backend/tests/test_production_database.py",
         "backend/tests/test_intelligent_tutoring.py",
         "frontend/src/timer.ts",
         "frontend/src/timer.test.ts",
@@ -122,6 +127,7 @@ def validate(paths: list[Path]):
         "scripts/package_full_system.py",
         "scripts/validate_full_system.py",
         "scripts/validate_deployment.py",
+        "scripts/smoke_test_deployment.py",
         "scripts/migrate_sqlite_to_postgres.py",
         "scripts/build_shareable_package.py",
         "scripts/generate_launcher_assets.py",
@@ -138,6 +144,7 @@ def validate(paths: list[Path]):
         "launcher/templates/LICENSE.txt",
         ".github/workflows/build-windows-shareable.yml",
         ".github/workflows/build-android-apk.yml",
+        ".github/workflows/production-ci.yml",
         ".env.example",
         ".dockerignore",
         "Dockerfile",

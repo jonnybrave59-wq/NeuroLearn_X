@@ -1,4 +1,4 @@
-# NeuroLearn-X Full System 1.3.0
+# NeuroLearn-X Full System 1.3.1
 
 This package contains the complete NeuroLearn-X application:
 

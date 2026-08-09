@@ -18,6 +18,26 @@ def test_public_health_alias_and_security_headers(client):
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert response.headers["cross-origin-opener-policy"] == "same-origin"
+    assert len(response.headers["x-request-id"]) >= 8
+
+
+def test_request_id_is_correlated_and_private_api_is_not_cached(student_client):
+    response = student_client.get(
+        "/api/student/dashboard",
+        headers={"X-Request-ID": "test-request-1234"},
+    )
+    assert response.status_code == 200
+    assert response.headers["x-request-id"] == "test-request-1234"
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert response.headers["pragma"] == "no-cache"
+
+
+def test_invalid_request_id_is_replaced(client):
+    response = client.get("/api/health", headers={"X-Request-ID": "unsafe value"})
+    assert response.status_code == 200
+    assert response.headers["x-request-id"] != "unsafe value"
+    assert len(response.headers["x-request-id"]) == 32
 
 
 def test_expired_session_response_clears_the_invalid_cookie(client):
@@ -54,6 +74,8 @@ def test_approved_development_origin_receives_credentialed_cors(client):
 
 def run_validator(overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
+    environment.setdefault("PRODUCTION_TEACHER_PASSWORD", "PrivateTeacher!2026")
+    environment.setdefault("PRODUCTION_DEMO_STUDENT_PASSWORD", "PrivateStudent!2026")
     environment.update(overrides)
     return subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "validate_deployment.py")],
@@ -136,3 +158,28 @@ def test_render_hostname_supplies_the_canonical_same_origin():
         }
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_production_validator_rejects_startup_seeding_and_partial_ai_configuration():
+    public_url = "https://neurolearnx-test.onrender.com"
+    result = run_validator(
+        {
+            "APP_ENV": "production",
+            "DATABASE_URL": "postgresql://user:pass@db.example/neurolearnx",
+            "SECRET_KEY": "x" * 64,
+            "COOKIE_SECURE": "1",
+            "COOKIE_SAMESITE": "lax",
+            "PUBLIC_APP_URL": public_url,
+            "ALLOWED_ORIGINS": public_url,
+            "CAPACITOR_ORIGINS": "",
+            "CREATE_TABLES_ON_STARTUP": "0",
+            "SEED_DEMO_IF_EMPTY": "1",
+            "AI_PROVIDER": "openai-compatible",
+            "AI_MODEL": "",
+            "AI_API_KEY": "",
+            "OPENAI_API_KEY": "",
+        }
+    )
+    assert result.returncode == 1
+    assert "startup seeding must be disabled" in result.stderr
+    assert "must be configured together" in result.stderr

@@ -15,7 +15,7 @@ import { Link } from "react-router-dom";
 import { Brand } from "./components";
 import { copyText, InstallButton, publicShareUrl } from "./pwa";
 
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 const RELEASE_DATE = "August 5, 2026";
 
 export default function DownloadPage() {

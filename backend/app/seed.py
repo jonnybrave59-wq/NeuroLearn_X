@@ -39,6 +39,7 @@ from .models import (
     User,
 )
 from .security import hash_password
+from .onboarding import ensure_onboarding_diagnostic
 from .services import DEFAULT_SETTINGS, generate_pathways, save_settings
 
 
@@ -534,7 +535,6 @@ def _seed_users_and_history(db: Session, concepts: dict[str, Concept]) -> None:
             student.role = "student"
             student.display_name = name
             student.must_change_password = True
-            student.is_active = True
             student.is_demo = True
         profile = db.scalar(
             select(StudentProfile).where(StudentProfile.user_id == student.id)
@@ -544,10 +544,16 @@ def _seed_users_and_history(db: Session, concepts: dict[str, Concept]) -> None:
                 StudentProfile(
                     user_id=student.id,
                     target_concept_id=concepts[target_code].id,
+                    onboarding_completed_at=datetime.now(timezone.utc),
+                    onboarding_version="1.0",
                 )
             )
         else:
             profile.target_concept_id = concepts[target_code].id
+            profile.onboarding_completed_at = (
+                profile.onboarding_completed_at or datetime.now(timezone.utc)
+            )
+            profile.onboarding_version = "1.0"
         consent = db.scalar(
             select(ConsentRecord).where(
                 ConsentRecord.student_id == student.id,
@@ -572,7 +578,14 @@ def _seed_users_and_history(db: Session, concepts: dict[str, Concept]) -> None:
     ):
         return
     randomizer = random.Random(20260730)
-    activities = list(db.scalars(select(Activity).where(Activity.is_diagnostic.is_(True))))
+    activities = list(
+        db.scalars(
+            select(Activity).where(
+                Activity.is_diagnostic.is_(True),
+                Activity.is_onboarding_diagnostic.is_(False),
+            )
+        )
+    )
     now = datetime.now(timezone.utc)
     for student_index, (student, ability) in enumerate(students):
         selected = activities[:]
@@ -691,10 +704,18 @@ def seed_database(db: Session, train_model: bool = True) -> None:
     concepts = _seed_content(db)
     _seed_tutoring_metadata(db, concepts)
     _seed_users_and_history(db, concepts)
+    ensure_onboarding_diagnostic(db)
     if train_model and not db.scalar(select(ModelVersion.id).limit(1)):
         try:
             train_ensemble(db, is_demo=True)
-            for student in db.scalars(select(User).where(User.role == "student", User.is_demo)):
+            for student in db.scalars(
+                select(User).where(
+                    User.role == "student",
+                    User.is_demo,
+                    User.is_active.is_(True),
+                    User.account_status == "Active",
+                )
+            ):
                 generate_pathways(db, student)
         except ValueError:
             pass
