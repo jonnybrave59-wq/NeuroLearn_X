@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
+
 from fastapi import (
     Depends,
     FastAPI,
@@ -138,6 +140,7 @@ from .services import (
     serialize_pathway,
     settings_payload,
 )
+from .storage import delete_object, upload_object
 from .tutoring import (
     start_tutoring_session,
     structured_solution,
@@ -534,6 +537,9 @@ def uploaded_document_payload(document: UploadedDocument) -> dict[str, Any]:
         "text_length": len(document.extracted_text or ""),
         "text_preview": clean_content(document.extracted_text or "", 450),
         "analysis": document.analysis or {},
+        "file_persisted": bool(
+            document.storage_bucket and document.storage_object_path
+        ),
         "created_at": document.created_at,
     }
 
@@ -4975,6 +4981,20 @@ async def upload_learning_document(
             status_code=504,
             detail="Document processing took too long. Try a smaller file.",
         ) from error
+    object_path = f"teacher-{teacher.id}/{uuid.uuid4().hex}{extension}"
+    try:
+        stored_object = await upload_object(
+            object_path,
+            data,
+            file.content_type or "application/octet-stream",
+        )
+    except (httpx.HTTPError, RuntimeError) as error:
+        logger.exception("Persistent document storage failed")
+        raise HTTPException(
+            status_code=502,
+            detail="The learning material could not be saved to persistent storage",
+        ) from error
+    storage_bucket, storage_object_path = stored_object or (None, None)
     document = UploadedDocument(
         original_filename=filename,
         file_type=extension.removeprefix(".").upper(),
@@ -4984,6 +5004,8 @@ async def upload_learning_document(
         processing_status="Ready",
         extracted_text=extracted_text,
         analysis=analyze_material(extracted_text),
+        storage_bucket=storage_bucket,
+        storage_object_path=storage_object_path,
     )
     db.add(document)
     db.flush()
@@ -5005,7 +5027,7 @@ async def upload_learning_document(
 
 
 @app.delete("/api/teacher/documents/{document_id}")
-def archive_learning_document(
+async def archive_learning_document(
     document_id: int,
     db: Session = Depends(get_db),
     teacher: User = Depends(require_role("teacher")),
@@ -5013,6 +5035,14 @@ def archive_learning_document(
     document = db.get(UploadedDocument, document_id)
     if not document or document.uploaded_by != teacher.id:
         raise HTTPException(status_code=404, detail="Uploaded document not found")
+    try:
+        await delete_object(document.storage_bucket, document.storage_object_path)
+    except (httpx.HTTPError, RuntimeError) as error:
+        logger.exception("Persistent document deletion failed")
+        raise HTTPException(
+            status_code=502,
+            detail="The learning material could not be removed from persistent storage",
+        ) from error
     document.processing_status = "Archived"
     audit(
         db,

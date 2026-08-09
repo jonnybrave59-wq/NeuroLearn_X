@@ -122,6 +122,19 @@ def main() -> int:
         if not ai_base_url.startswith("https://"):
             errors.append("AI_BASE_URL must use HTTPS in production.")
 
+    storage_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    storage_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    storage_bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "").strip()
+    if any((storage_url, storage_key, storage_bucket)) and not all(
+        (storage_url, storage_key, storage_bucket)
+    ):
+        errors.append(
+            "SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and "
+            "SUPABASE_STORAGE_BUCKET must be configured together."
+        )
+    if storage_url and origin(storage_url) != storage_url:
+        errors.append("SUPABASE_URL must be a clean HTTPS origin.")
+
     numeric_limits = {
         "DB_CONNECT_TIMEOUT_SECONDS": (1, 120, 10),
         "DB_STATEMENT_TIMEOUT_MS": (1000, 300000, 30000),
@@ -131,6 +144,7 @@ def main() -> int:
         "DB_POOL_TIMEOUT_SECONDS": (1, 120, 15),
         "MAX_UPLOAD_SIZE_MB": (1, 50, 10),
         "UPLOAD_PROCESSING_TIMEOUT_SECONDS": (5, 300, 45),
+        "SUPABASE_STORAGE_TIMEOUT_SECONDS": (5, 120, 30),
         "UVICORN_LIMIT_CONCURRENCY": (10, 1000, 100),
     }
     for name, (minimum, maximum, default) in numeric_limits.items():

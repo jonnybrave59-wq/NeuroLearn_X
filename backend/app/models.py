@@ -113,6 +113,8 @@ class UploadedDocument(Base, TimestampMixin):
     extracted_text: Mapped[str] = mapped_column(Text, default="")
     analysis: Mapped[dict] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(String(300))
+    storage_bucket: Mapped[str | None] = mapped_column(String(120))
+    storage_object_path: Mapped[str | None] = mapped_column(String(700))
 
 
 class Concept(Base, TimestampMixin):
