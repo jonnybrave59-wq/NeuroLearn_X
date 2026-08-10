@@ -15,7 +15,8 @@
         "vercel.py": {
           "memory": 2048,
           "maxDuration": 300,
-          "includeFiles": "{app/**,alembic/**,alembic.ini}"
+          "includeFiles": "{app/**,alembic/**,alembic.ini}",
+          "excludeFiles": "{**/__pycache__/**,**/*.pyc,**/tests/**,**/test/**}"
         }
       }
     }
