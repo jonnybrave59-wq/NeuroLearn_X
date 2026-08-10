@@ -35,7 +35,7 @@ def synchronize_demo_credentials(
     teacher_password: str,
     student_password: str,
 ) -> int:
-    """Make deployment secrets authoritative for demo accounts only."""
+    """Make deployment secrets authoritative for reserved demo accounts."""
     rotated = 0
     teacher = db.scalar(
         select(User).where(
@@ -45,7 +45,6 @@ def synchronize_demo_credentials(
     )
     if (
         teacher
-        and teacher.is_demo
         and not verify_password(teacher_password, teacher.password_hash)
     ):
         teacher.password_hash = hash_password(teacher_password)

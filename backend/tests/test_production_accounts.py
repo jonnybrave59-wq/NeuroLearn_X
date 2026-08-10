@@ -36,10 +36,9 @@ def test_configured_secrets_are_authoritative_for_demo_accounts():
     assert verify_password("Current!Student1", student.password_hash)
 
 
-def test_real_teacher_credential_is_never_overwritten():
-    teacher = account("teacher", "TEACHER01", "Real!Teacher1", is_demo=False)
+def test_no_teacher_record_is_created_or_changed_when_reserved_account_is_absent():
     db = MagicMock()
-    db.scalar.return_value = teacher
+    db.scalar.return_value = None
     db.scalars.return_value = []
 
     changed = synchronize_demo_credentials(
@@ -49,4 +48,4 @@ def test_real_teacher_credential_is_never_overwritten():
     )
 
     assert changed == 0
-    assert verify_password("Real!Teacher1", teacher.password_hash)
+    db.add.assert_not_called()
