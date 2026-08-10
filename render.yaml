@@ -11,6 +11,12 @@ services:
     envVars:
       - key: APP_ENV
         value: production
+      - key: PUBLIC_APP_URL
+        value: https://neurolearn-x-staging.vercel.app
+      - key: FRONTEND_ORIGIN
+        value: https://neurolearn-x-staging.vercel.app
+      - key: ALLOWED_ORIGINS
+        value: https://neurolearn-x-staging.vercel.app
       - key: DATABASE_URL
         sync: false
       - key: SUPABASE_URL
