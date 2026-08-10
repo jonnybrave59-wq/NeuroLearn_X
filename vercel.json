@@ -12,7 +12,7 @@
       "framework": "fastapi",
       "entrypoint": "vercel:app",
       "functions": {
-        "vercel.py": {
+        "**/*.py": {
           "memory": 2048,
           "maxDuration": 300,
           "includeFiles": "{app/**,alembic/**,alembic.ini}",
