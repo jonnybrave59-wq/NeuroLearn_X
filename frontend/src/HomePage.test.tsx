@@ -8,7 +8,7 @@ import HomePage from "./HomePage";
 
 
 describe("HomePage", () => {
-  it("explains the system and exposes the required portals without download claims", () => {
+  it("explains the system and exposes the required portals and install control", () => {
     render(
       <MemoryRouter>
         <HomePage />
@@ -28,8 +28,9 @@ describe("HomePage", () => {
     expect(
       screen.getByRole("link", { name: "Create Student Account" }),
     ).toHaveAttribute("href", "/register/student");
-    expect(screen.queryByText("Download App")).not.toBeInTheDocument();
-    expect(screen.queryByText("Install NeuroLearn-X")).not.toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: "Install NeuroLearn-X" }),
+    ).toHaveLength(2);
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "About NeuroLearn-X" }));

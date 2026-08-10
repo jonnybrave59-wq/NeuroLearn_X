@@ -50,7 +50,7 @@ import {
   PageHeader,
   ProgressBar,
 } from "./components";
-import { ShareButton } from "./pwa";
+import { InstallButton, ShareButton } from "./pwa";
 import { Equation } from "./Equation";
 import {
   countdownTone,
@@ -185,6 +185,10 @@ export default function StudentApp({
             );
           })}
         </nav>
+        <InstallButton
+          compact
+          className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-slate-300 hover:bg-white/10 hover:text-white lg:hidden"
+        />
         <ShareButton />
         <button
           onClick={onLogout}
@@ -196,6 +200,17 @@ export default function StudentApp({
       </aside>
       <main className="min-h-screen px-4 pb-12 pt-20 sm:px-7 lg:ml-[278px] lg:px-10 lg:pt-9">
         <div className="mx-auto max-w-7xl">
+          <div className="mb-4 flex justify-end">
+            <InstallButton
+              compact
+              className="hidden items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-bold text-navy-950 shadow-sm hover:bg-slate-50 lg:flex"
+            />
+            <InstallButton
+              compact
+              iconOnly
+              className="fixed right-4 top-4 z-20 grid h-11 w-11 place-items-center rounded-xl bg-white text-navy-950 shadow-lg lg:hidden"
+            />
+          </div>
           {error && <ErrorNotice message={error} onDismiss={() => setError("")} />}
           <Routes>
             <RouterRoute

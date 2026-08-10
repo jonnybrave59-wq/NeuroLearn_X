@@ -15,6 +15,7 @@ import {
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Brand } from "./components";
+import { InstallButton } from "./pwa";
 
 const studentFeatures = [
   "Create an account",
@@ -63,6 +64,15 @@ export default function HomePage() {
                 <ShieldCheck size={16} className="text-cyanx-400" />
                 Grade 12 STEM research prototype
               </div>
+              <InstallButton
+                compact
+                className="hidden items-center gap-2 rounded-xl border border-white/20 px-3 py-2.5 text-sm font-bold text-white transition hover:bg-white/10 sm:flex"
+              />
+              <InstallButton
+                compact
+                iconOnly
+                className="grid h-10 w-10 place-items-center rounded-xl border border-white/20 text-cyanx-400 transition hover:bg-white/10 sm:hidden"
+              />
               <button
                 type="button"
                 className="grid h-10 w-10 place-items-center rounded-xl border border-white/20 text-cyanx-400 transition hover:bg-white/10"

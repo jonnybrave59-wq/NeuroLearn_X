@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectionStatus, InstallButton, publicShareUrl } from "./pwa";
 import { resetConnectionStateForTests, setConnectionState } from "./connection";
@@ -50,27 +50,47 @@ describe("PWA controls", () => {
       screen.getByRole("button", { name: "Install NeuroLearn-X" }),
     );
     expect(
-      screen.getByRole("dialog", { name: "Install NeuroLearn-X" }),
+      screen.getByRole("dialog", { name: "Get NeuroLearn-X App" }),
     ).toBeInTheDocument();
     expect(screen.getByText(/Add to Home Screen/)).toBeInTheDocument();
   });
 
-  it("hides installation when the browser offers no supported install path", () => {
+  it("shows safe manual guidance when the browser offers no automatic install path", () => {
     vi.spyOn(window.navigator, "userAgent", "get").mockReturnValue(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
     );
     render(<InstallButton />);
-    expect(
-      screen.queryByRole("button", { name: "Install NeuroLearn-X" }),
-    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Install NeuroLearn-X" }));
+    expect(screen.getByRole("dialog", { name: "Get NeuroLearn-X App" })).toHaveTextContent(
+      "does not provide an automatic installation prompt",
+    );
   });
 
-  it("hides the installation control in standalone mode", () => {
+  it("shows a disabled installed state in standalone mode", () => {
     installMatchMedia(true);
     render(<InstallButton />);
     expect(
-      screen.queryByRole("button", { name: "Install NeuroLearn-X" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "NeuroLearn-X app is installed" }),
+    ).toBeDisabled();
+    expect(screen.getByText("App Installed")).toBeInTheDocument();
+  });
+
+  it("opens the real browser installation prompt from the dialog", async () => {
+    const prompt = vi.fn().mockResolvedValue(undefined);
+    const event = new Event("beforeinstallprompt") as Event & {
+      prompt: () => Promise<void>;
+      userChoice: Promise<{ outcome: "accepted"; platform: string }>;
+    };
+    event.prompt = prompt;
+    event.userChoice = Promise.resolve({ outcome: "accepted", platform: "web" });
+    render(<InstallButton />);
+    fireEvent(window, event);
+    fireEvent.click(screen.getByRole("button", { name: "Install NeuroLearn-X" }));
+    const dialog = screen.getByRole("dialog", { name: "Get NeuroLearn-X App" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Install NeuroLearn-X" }));
+
+    await waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/Installation accepted/)).toBeInTheDocument();
   });
 
   it("shows one server warning and reconnects with Retry", async () => {

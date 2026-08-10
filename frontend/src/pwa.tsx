@@ -1,4 +1,5 @@
 import {
+  CheckCircle2,
   Download,
   LoaderCircle,
   QrCode,
@@ -6,6 +7,7 @@ import {
   ServerOff,
   Share2,
   ShieldAlert,
+  Smartphone,
   WifiOff,
   X,
 } from "lucide-react";
@@ -42,7 +44,7 @@ if (typeof window !== "undefined") {
 
 function isStandalone() {
   return (
-    window.matchMedia("(display-mode: standalone)").matches ||
+    window.matchMedia?.("(display-mode: standalone)").matches === true ||
     (navigator as Navigator & { standalone?: boolean }).standalone === true
   );
 }
@@ -68,12 +70,12 @@ export function useInstallApp() {
   const [, refresh] = useState(0);
   useEffect(() => {
     const listener = () => refresh((value) => value + 1);
-    const media = window.matchMedia("(display-mode: standalone)");
+    const media = window.matchMedia?.("(display-mode: standalone)");
     installSubscribers.add(listener);
-    media.addEventListener?.("change", listener);
+    media?.addEventListener?.("change", listener);
     return () => {
       installSubscribers.delete(listener);
-      media.removeEventListener?.("change", listener);
+      media?.removeEventListener?.("change", listener);
     };
   }, []);
   const installed = isStandalone();
@@ -84,44 +86,94 @@ export function useInstallApp() {
     const prompt = pendingInstallPrompt;
     await prompt.prompt();
     const choice = await prompt.userChoice;
-    if (choice.outcome === "accepted") pendingInstallPrompt = null;
+    pendingInstallPrompt = null;
     installSubscribers.forEach((listener) => listener());
     return choice.outcome === "accepted";
   }
   return { canPrompt, installed, supported, install };
 }
 
+function PhoneDownloadIcon({ size = 20 }: { size?: number }) {
+  return (
+    <span className="relative inline-grid shrink-0 place-items-center" aria-hidden="true">
+      <Smartphone size={size} />
+      <Download
+        size={Math.max(10, Math.round(size * 0.55))}
+        strokeWidth={3}
+        className="absolute -bottom-1 -right-1 rounded-sm bg-cyanx-400 p-[1px] text-navy-950"
+      />
+    </span>
+  );
+}
+
 export function InstallButton({
   className = "btn-primary",
   compact = false,
+  iconOnly = false,
 }: {
   className?: string;
   compact?: boolean;
+  iconOnly?: boolean;
 }) {
-  const { canPrompt, installed, supported, install } = useInstallApp();
-  const [showGuide, setShowGuide] = useState(false);
-  if (installed || !supported) return null;
-
-  async function beginInstall() {
-    if (canPrompt) {
-      await install();
-      return;
-    }
-    setShowGuide(true);
-  }
+  const installState = useInstallApp();
+  const [open, setOpen] = useState(false);
+  const label = installState.installed
+    ? "App Installed"
+    : compact
+      ? "Install App"
+      : "Install NeuroLearn-X";
 
   return (
     <>
-      <button type="button" onClick={beginInstall} className={className}>
-        <Download size={17} />
-        {compact ? "Install app" : "Install NeuroLearn-X"}
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className={`${className} disabled:cursor-default disabled:opacity-70`}
+        disabled={installState.installed}
+        aria-label={installState.installed ? "NeuroLearn-X app is installed" : "Install NeuroLearn-X"}
+        aria-haspopup="dialog"
+        title={installState.installed ? "NeuroLearn-X is already installed" : "Get the NeuroLearn-X app"}
+      >
+        {installState.installed ? <CheckCircle2 size={18} aria-hidden="true" /> : <PhoneDownloadIcon size={19} />}
+        {iconOnly ? <span className="sr-only">{label}</span> : label}
       </button>
-      {showGuide && <InstallGuideDialog onClose={() => setShowGuide(false)} />}
+      {open && (
+        <InstallGuideDialog
+          {...installState}
+          onClose={() => setOpen(false)}
+        />
+      )}
     </>
   );
 }
 
-function InstallGuideDialog({ onClose }: { onClose: () => void }) {
+function InstallGuideDialog({
+  canPrompt,
+  installed,
+  supported,
+  install,
+  onClose,
+}: ReturnType<typeof useInstallApp> & { onClose: () => void }) {
+  const [status, setStatus] = useState<"idle" | "prompting" | "accepted" | "cancelled">("idle");
+
+  useEffect(() => {
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  async function beginInstall() {
+    setStatus("prompting");
+    try {
+      const accepted = await install();
+      setStatus(accepted ? "accepted" : "cancelled");
+    } catch {
+      setStatus("cancelled");
+    }
+  }
+
   return (
     <div
       className="fixed inset-0 z-[100] grid place-items-center bg-navy-950/70 p-4 backdrop-blur-sm"
@@ -139,7 +191,7 @@ function InstallGuideDialog({ onClose }: { onClose: () => void }) {
               Install on this device
             </div>
             <h2 id="install-guide-title" className="mt-1 text-2xl font-black text-navy-950">
-              Install NeuroLearn-X
+              Get NeuroLearn-X App
             </h2>
           </div>
           <button
@@ -151,24 +203,40 @@ function InstallGuideDialog({ onClose }: { onClose: () => void }) {
             <X size={19} />
           </button>
         </div>
-        <div className="mt-6 space-y-4 text-sm leading-6 text-slate-600">
-          <p>
-            <strong className="text-navy-950">iPhone or iPad:</strong> open this
-            page in Safari, tap Share, then choose Add to Home Screen.
-          </p>
-          <p>
-            <strong className="text-navy-950">Android:</strong> open this page
-            in Chrome, open the browser menu, then choose Install app or Add to
-            Home screen.
-          </p>
-          <p>
-            <strong className="text-navy-950">Windows:</strong> open this page
-            in Chrome or Edge and select the install icon in the address bar or
-            Install app from the browser menu.
-          </p>
-        </div>
-        <button type="button" onClick={onClose} className="btn-primary mt-6 w-full">
-          Got it
+        {installed ? (
+          <div className="mt-6 flex items-start gap-3 rounded-2xl bg-emerald-50 p-4 text-sm text-emerald-800">
+            <CheckCircle2 className="mt-0.5 shrink-0" size={20} />
+            <div><strong>App Installed</strong><p className="mt-1">NeuroLearn-X is already running as an installed app on this device.</p></div>
+          </div>
+        ) : canPrompt || status !== "idle" ? (
+          <div className="mt-6">
+            <p className="text-sm leading-6 text-slate-600">
+              Install the verified web app to open NeuroLearn-X in its own standalone window with its own icon and theme.
+            </p>
+            {(status === "idle" || status === "prompting") && (
+              <button
+                type="button"
+                onClick={beginInstall}
+                disabled={status === "prompting"}
+                className="btn-primary mt-5 w-full"
+              >
+                {status === "prompting" ? <LoaderCircle className="animate-spin" size={18} /> : <PhoneDownloadIcon size={19} />}
+                {status === "prompting" ? "Opening install prompt…" : "Install NeuroLearn-X"}
+              </button>
+            )}
+            {status === "accepted" && <p className="mt-3 text-sm font-semibold text-emerald-700">Installation accepted. Complete any remaining browser confirmation.</p>}
+            {status === "cancelled" && <p className="mt-3 text-sm font-semibold text-amber-700">Installation was cancelled. You can use the browser menu to install later.</p>}
+          </div>
+        ) : (
+          <div className="mt-6 space-y-4 text-sm leading-6 text-slate-600">
+            {!supported && <p className="rounded-xl bg-amber-50 px-4 py-3 text-amber-800">This browser does not provide an automatic installation prompt. Use a supported browser or the manual steps below.</p>}
+            <p><strong className="text-navy-950">iPhone or iPad:</strong> open this page in Safari, tap Share, then choose Add to Home Screen.</p>
+            <p><strong className="text-navy-950">Android:</strong> open this page in Chrome, open the browser menu, then choose Install app or Add to Home screen.</p>
+            <p><strong className="text-navy-950">Windows:</strong> open this page in Chrome or Edge and select the install icon in the address bar or Install app from the browser menu.</p>
+          </div>
+        )}
+        <button type="button" onClick={onClose} className="mt-6 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50">
+          Close
         </button>
       </section>
     </div>
