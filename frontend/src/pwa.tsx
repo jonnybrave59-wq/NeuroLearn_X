@@ -464,6 +464,7 @@ export function ConnectionStatus() {
 
   const icons: Record<Exclude<ConnectionKind, "online">, React.ReactNode> = {
     loading: <LoaderCircle className="animate-spin" size={17} />,
+    "server-starting": <LoaderCircle className="animate-spin" size={17} />,
     offline: <WifiOff size={17} />,
     "server-unavailable": <ServerOff size={17} />,
     "session-expired": <ShieldAlert size={17} />,

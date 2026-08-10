@@ -10,7 +10,9 @@ import { cacheApiResponse, clearOfflineSession } from "./offline";
 export { API_BASE, apiUrl };
 
 const API_TIMEOUT_MS = 12_000;
-const HEALTH_TIMEOUT_MS = 8_000;
+const HEALTH_TIMEOUT_MS = 12_000;
+const COLD_START_RETRY_DELAYS_MS =
+  import.meta.env.MODE === "test" ? [0] : [0, 3_000, 6_000, 9_000];
 
 type ApiRequestOptions = RequestInit & {
   suppressSessionExpiry?: boolean;
@@ -99,7 +101,11 @@ function authenticatedRequest(path: string, suppressSessionExpiry: boolean) {
 }
 
 export async function diagnoseConnection(
-  options: { showLoading?: boolean; force?: boolean } = {},
+  options: {
+    showLoading?: boolean;
+    force?: boolean;
+    retryDelaysMs?: readonly number[];
+  } = {},
 ) {
   if (API_CONFIGURATION.error) {
     return setConnectionState("configuration-error");
@@ -119,42 +125,67 @@ export async function diagnoseConnection(
   if (options.showLoading) setConnectionState("loading");
 
   healthProbeInFlight = (async () => {
-    const controller = new AbortController();
-    const timeout = globalThis.setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+    const retryDelays = options.retryDelaysMs || COLD_START_RETRY_DELAYS_MS;
     try {
-      const response = await fetch(API_CONFIGURATION.healthUrl, {
-        method: "GET",
-        credentials: "include",
-        cache: "no-store",
-        headers: { Accept: "application/json" },
-        signal: controller.signal,
-      });
+      for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+        const retryDelay = retryDelays[attempt] || 0;
+        if (retryDelay > 0) {
+          setConnectionState("server-starting");
+          await new Promise((resolve) => globalThis.setTimeout(resolve, retryDelay));
+        }
 
-      if (response.status === 401 || response.status === 403) {
-        await clearOfflineSession();
-        return setConnectionState("session-expired");
-      }
-      if (response.status === 404) {
-        return setConnectionState("configuration-error");
-      }
-      if (!response.ok) {
-        return setConnectionState("server-unavailable");
-      }
+        const controller = new AbortController();
+        const timeout = globalThis.setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+        try {
+          const response = await fetch(API_CONFIGURATION.healthUrl, {
+            method: "GET",
+            credentials: "include",
+            cache: "no-store",
+            headers: { Accept: "application/json" },
+            signal: controller.signal,
+          });
 
-      let payload: { status?: string; service?: string };
-      try {
-        payload = (await response.json()) as { status?: string; service?: string };
-      } catch {
-        return setConnectionState("configuration-error");
+          if (response.status === 401 || response.status === 403) {
+            await clearOfflineSession();
+            return setConnectionState("session-expired");
+          }
+          if (response.status === 404) {
+            return setConnectionState("configuration-error");
+          }
+          if (!response.ok) {
+            if (response.status >= 500 && attempt < retryDelays.length - 1) {
+              setConnectionState("server-starting");
+              continue;
+            }
+            return setConnectionState("server-unavailable");
+          }
+
+          let payload: { status?: string; service?: string };
+          try {
+            payload = (await response.json()) as { status?: string; service?: string };
+          } catch {
+            return setConnectionState("configuration-error");
+          }
+          if (payload.status !== "ok" || payload.service !== "NeuroLearn-X API") {
+            return setConnectionState("configuration-error");
+          }
+          return setConnectionState("online");
+        } catch {
+          const failureKind = await failedFetchKind();
+          if (
+            failureKind === "server-unavailable" &&
+            attempt < retryDelays.length - 1
+          ) {
+            setConnectionState("server-starting");
+            continue;
+          }
+          return setConnectionState(failureKind);
+        } finally {
+          globalThis.clearTimeout(timeout);
+        }
       }
-      if (payload.status !== "ok" || payload.service !== "NeuroLearn-X API") {
-        return setConnectionState("configuration-error");
-      }
-      return setConnectionState("online");
-    } catch {
-      return setConnectionState(await failedFetchKind());
+      return setConnectionState("server-unavailable");
     } finally {
-      globalThis.clearTimeout(timeout);
       lastHealthProbeAt = Date.now();
       healthProbeInFlight = null;
     }

@@ -119,6 +119,19 @@ describe("PWA controls", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("shows a cold-start message without calling it an internet failure", () => {
+    setConnectionState("server-starting");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok", service: "NeuroLearn-X API" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    render(<ConnectionStatus />);
+    expect(screen.getByText("Starting NeuroLearn-X server…")).toBeInTheDocument();
+    expect(screen.queryByText(/No internet/i)).not.toBeInTheDocument();
+  });
+
   it("shows the session-expired message instead of an internet warning", async () => {
     setConnectionState("session-expired");
     vi.spyOn(globalThis, "fetch").mockResolvedValue(

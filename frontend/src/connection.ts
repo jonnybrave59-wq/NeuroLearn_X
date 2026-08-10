@@ -1,5 +1,6 @@
 export type ConnectionKind =
   | "loading"
+  | "server-starting"
   | "online"
   | "offline"
   | "server-unavailable"
@@ -13,6 +14,7 @@ export type ConnectionState = {
 
 export const CONNECTION_MESSAGES: Record<ConnectionKind, string> = {
   loading: "Connecting to NeuroLearn-X…",
+  "server-starting": "Starting NeuroLearn-X server…",
   online: "Connected to NeuroLearn-X.",
   offline: "You appear to be offline. Check your connection and try again.",
   "server-unavailable":
