@@ -25,6 +25,7 @@ import {
   GitBranch,
   GraduationCap,
   History,
+  HelpCircle,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -281,20 +282,6 @@ function TeacherOverview() {
         <MetricCard label="At-risk learners" value={data.at_risk_students || 0} detail="Latest mastery below 50%" icon={<Gauge size={20} />} tone="rose" />
         <MetricCard label="Open interventions" value={data.open_interventions || 0} detail="Teacher actions to follow up" icon={<ShieldCheck size={20} />} tone="cyan" />
       </div>
-      <section className="mt-6 rounded-2xl bg-white p-6 shadow-soft">
-        <h2 className="text-lg font-black text-navy-950">Common validated misconception patterns</h2>
-        <p className="mt-1 text-xs text-slate-500">Only teacher-reviewed distractor mappings are counted; an isolated unsupported wrong answer is not diagnosed.</p>
-        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          {(data.misconception_patterns || []).map((item: any) => (
-            <div key={item.id} className="rounded-xl border border-amber-200 bg-amber-50 p-4">
-              <div className="text-xs font-black uppercase tracking-wide text-amber-700">{item.code}</div>
-              <div className="mt-1 font-black text-navy-950">{item.name}</div>
-              <div className="mt-2 text-sm text-amber-900">{item.evidence_count} unresolved observation{item.evidence_count === 1 ? "" : "s"}</div>
-            </div>
-          ))}
-          {!data.misconception_patterns?.length && <p className="text-sm text-slate-500">No unresolved validated pattern evidence is currently stored.</p>}
-        </div>
-      </section>
       <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_0.75fr]">
         <section className="min-w-0 rounded-2xl bg-white p-6 shadow-soft">
           <div className="flex items-center justify-between">
@@ -1457,6 +1444,18 @@ function GraphEditor() {
         title="Knowledge-graph editor"
         description="Create prerequisite relationships with server-side cycle detection. An edge points from prerequisite to succeeding concept."
       />
+      <details open className="mb-6 rounded-2xl border border-cyan-200 bg-cyan-50 p-5 text-sm text-cyan-950">
+        <summary className="cursor-pointer font-black">Knowledge-graph colors and arrow help</summary>
+        <p className="mt-3">Every arrow points from a prerequisite concept to the succeeding concept that depends on it.</p>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <span><i className="mr-2 inline-block h-3 w-3 rounded bg-[#eafcfd] ring-1 ring-cyan-300" />Light cyan node: active General Mathematics concept</span>
+          <span><i className="mr-2 inline-block h-3 w-3 rounded bg-navy-950" />Navy node: active concept in another subject</span>
+          <span><i className="mr-2 inline-block h-3 w-3 rounded bg-slate-200" />Gray node: archived concept</span>
+          <span><i className="mr-2 inline-block h-3 w-3 rounded bg-rose-600" />Rose border/edge: currently selected</span>
+          <span><i className="mr-2 inline-block h-1 w-5 bg-cyan-600" />Cyan border/edge: highlighted prerequisite chain</span>
+          <span><i className="mr-2 inline-block h-1 w-5 bg-slate-400" />Gray edge: other active relationship</span>
+        </div>
+      </details>
       {error && <ErrorNotice message={error} onDismiss={() => setError("")} />}
       <form
         onSubmit={addEdge}
@@ -2163,6 +2162,7 @@ function TeacherSettings() {
   const [form, setForm] = useState<any>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [settingHelp, setSettingHelp] = useState("");
   useEffect(() => {
     api("/api/teacher/settings")
       .then(setForm)
@@ -2192,7 +2192,14 @@ function TeacherSettings() {
         eyebrow="Adaptive configuration"
         title="Mastery and optimization settings"
         description="Control mastery evidence, mental-effort categories, the expert Likert scale, and the alpha/beta/gamma trade-off."
+        action={<button type="button" className="icon-button" aria-label="Help for optimization settings" title="Help for optimization settings" onClick={() => setSettingHelp("overview")}><HelpCircle size={19} /></button>}
       />
+      {settingHelp && (
+        <div className="mb-6 flex items-start justify-between gap-4 rounded-2xl border border-cyan-200 bg-cyan-50 p-5 text-sm text-cyan-950" role="status">
+          <div><h2 className="font-black">{settingHelp === "weights" ? "Adaptive Pathway Score weights" : settingHelp === "mastery" ? "Mastery threshold" : "Optimization settings help"}</h2><p className="mt-2">{settingHelp === "weights" ? "Alpha, beta, and gamma each accept 0 to 1 and must total 1. Increasing alpha favors gap coverage, beta favors lower predicted cognitive load, and gamma favors shorter learning time." : settingHelp === "mastery" ? "The mastery threshold accepts 0.10 to 1.00. Raising it identifies more concepts as gaps; lowering it requires less evidence for mastery and can change pathway ranking." : "These controls set mastery rules, cognitive-load boundaries, tutoring limits, and pathway-ranking weights. Opening help never changes a saved value."}</p></div>
+          <button type="button" className="icon-button" aria-label="Close optimization help" onClick={() => setSettingHelp("")}><X size={16} /></button>
+        </div>
+      )}
       <details className="mb-6 rounded-2xl bg-white p-6 shadow-soft">
         <summary className="cursor-pointer text-lg font-black text-navy-950">What do these settings mean?</summary>
         <div className="mt-5 grid gap-5 text-sm leading-6 text-slate-600 lg:grid-cols-2">
@@ -2222,7 +2229,7 @@ function TeacherSettings() {
           <h2 className="text-lg font-black text-navy-950">Mastery calculation</h2>
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <label className="field">
-              <span>Mastery threshold</span>
+              <span className="inline-flex items-center gap-2">Mastery threshold <button type="button" aria-label="Mastery threshold help" title="Purpose, range, and pathway effect" onClick={() => setSettingHelp("mastery")}><HelpCircle size={15} /></button></span>
               <input
                 type="number"
                 step="0.01"
@@ -2281,7 +2288,7 @@ function TeacherSettings() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-black text-navy-950">
-                Adaptive Pathway Score weights
+                Adaptive Pathway Score weights <button type="button" className="ml-1 inline-flex align-middle" aria-label="Pathway score weight help" title="Purpose, range, and pathway effect" onClick={() => setSettingHelp("weights")}><HelpCircle size={17} /></button>
               </h2>
               <Equation latex={String.raw`APS=\alpha GC+\beta(1-PCL)+\gamma(1-NLT)`} label="Adaptive Pathway Score formula" block={false} className="text-xs text-slate-500" />
             </div>
@@ -2391,24 +2398,27 @@ function TeacherSettings() {
 
 function ModelDashboard() {
   const [versions, setVersions] = useState<any[] | null>(null);
+  const [evaluationStatus, setEvaluationStatus] = useState<any>(null);
   const [learners, setLearners] = useState<any[]>([]);
   const [learnerId, setLearnerId] = useState("");
   const [prediction, setPrediction] = useState<any>(null);
   const [predictionLoading, setPredictionLoading] = useState(false);
   const [training, setTraining] = useState(false);
-  const [mode, setMode] = useState("demo");
   const [error, setError] = useState("");
   const [learnerSearch, setLearnerSearch] = useState("");
   const [batchNotice, setBatchNotice] = useState("");
   const load = useCallback(() => {
     Promise.all([
-      api<any[]>("/api/teacher/models"),
+      api<any[]>("/api/teacher/models?mode=research"),
       api<any[]>("/api/teacher/students"),
+      api<any>("/api/teacher/models/evaluation-status"),
     ])
-      .then(([modelRows, studentRows]) => {
+      .then(([modelRows, studentRows, status]) => {
         setVersions(modelRows);
-        setLearners(studentRows);
-        setLearnerId((current) => current || (studentRows[0] ? String(studentRows[0].id) : ""));
+        const realLearners = studentRows.filter((learner: any) => !learner.is_demo);
+        setLearners(realLearners);
+        setEvaluationStatus(status);
+        setLearnerId((current) => current || (realLearners[0] ? String(realLearners[0].id) : ""));
       })
       .catch((cause) => setError(messageOf(cause)));
   }, []);
@@ -2440,7 +2450,7 @@ function ModelDashboard() {
     setTraining(true);
     setError("");
     try {
-      await post(`/api/teacher/models/train?mode=${mode}`);
+      await post("/api/teacher/models/train?mode=research");
       load();
     } catch (cause) {
       setError(messageOf(cause));
@@ -2449,7 +2459,7 @@ function ModelDashboard() {
     }
   }
   if (!versions) return <Loading label="Loading model versions…" />;
-  const active = versions.find((version) => version.active && version.is_demo === (mode === "demo"));
+  const active = versions.find((version) => version.active && !version.is_demo);
   const filteredLearners = learners.filter((learner) => `${learner.participant_code} ${learner.display_name}`.toLowerCase().includes(learnerSearch.toLowerCase()));
   const metricData = active
     ? [
@@ -2468,14 +2478,6 @@ function ModelDashboard() {
         description="Logistic Regression, Random Forest, and Gradient Boosting probabilities are combined by equal-weight soft voting. Evaluation is grouped by student."
         action={
           <div className="flex gap-2">
-            <select
-              className="input w-36"
-              value={mode}
-              onChange={(event) => setMode(event.target.value)}
-            >
-              <option value="demo">Demo mode</option>
-              <option value="research">Research mode</option>
-            </select>
             <button onClick={train} disabled={training} className="btn-primary">
               <RefreshCcw
                 size={17}
@@ -2488,7 +2490,7 @@ function ModelDashboard() {
       />
       {error && <ErrorNotice message={error} onDismiss={() => setError("")} />}
       {batchNotice && <p className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-800">{batchNotice}</p>}
-      {mode === "demo" && <DemoNotice />}
+      {evaluationStatus && <section className="mb-6 rounded-2xl bg-white p-5 shadow-soft"><h2 className="font-black text-navy-950">Real-data evaluation availability</h2><div className="mt-4 grid gap-3 sm:grid-cols-3"><MetricCard label="Real learners" value={evaluationStatus.real_learners} detail="Learners with labeled records" icon={<Users size={19} />} /><MetricCard label="Real labeled records" value={evaluationStatus.labeled_records} detail="Demo records excluded" icon={<Database size={19} />} tone="cyan" /><MetricCard label="Evaluation method" value="Grouped" detail="Learner-grouped; no learner leakage" icon={<ShieldCheck size={19} />} tone="amber" /></div>{!evaluationStatus.evaluation_available && <p className="mt-4 rounded-xl bg-amber-50 p-4 text-sm font-semibold text-amber-900">{evaluationStatus.message}</p>}</section>}
       <section className="mt-6 rounded-2xl bg-white p-6 shadow-soft">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -2575,11 +2577,9 @@ function ModelDashboard() {
         <div className="mt-6">
           <Empty
             title={
-              mode === "research"
-                ? "Insufficient validated data for model training"
-                : "No trained demo model"
+              "Insufficient real labeled data for model evaluation"
             }
-            description="Until a trained model is available, recommendations use a clearly labeled temporary rule-based estimate."
+            description={evaluationStatus?.message || "No real-data evaluation is currently available."}
           />
         </div>
       ) : (
@@ -2711,7 +2711,6 @@ function ModelDashboard() {
             <thead>
               <tr>
                 <th>Version</th>
-                <th>Mode</th>
                 <th>Trained</th>
                 <th>Sample</th>
                 <th>Student groups</th>
@@ -2722,7 +2721,6 @@ function ModelDashboard() {
               {versions.map((version) => (
                 <tr key={version.id}>
                   <td className="font-mono text-xs font-bold">{version.version}</td>
-                  <td>{version.is_demo ? "Demo" : "Research"}</td>
                   <td>{new Date(version.trained_at).toLocaleString()}</td>
                   <td>{version.sample_size}</td>
                   <td>{version.student_count}</td>

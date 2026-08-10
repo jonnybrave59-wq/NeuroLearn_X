@@ -37,7 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
-from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy import Integer, and_, delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -61,6 +61,7 @@ from .models import (
     Concept,
     ConsentRecord,
     CognitiveLoadPrediction,
+    GapDiagnosis,
     ExpertEvaluation,
     InteractionLog,
     ItemResponse,
@@ -240,7 +241,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="NeuroLearn-X API",
-    version="1.3.1",
+    version="1.3.3",
     description="Explainable adaptive learning research prototype.",
     lifespan=lifespan,
 )
@@ -2267,7 +2268,7 @@ def health(response: Response):
         "status": "ok",
         "service": "NeuroLearn-X API",
         "name": "NeuroLearn-X",
-        "version": "1.3.1",
+        "version": "1.3.3",
         "mode": "research prototype",
     }
 
@@ -3393,17 +3394,92 @@ def student_graph(
     }
     mastery = latest_mastery_map(db, student.id)
     threshold = float(get_setting(db, "mastery_threshold"))
+    selected_pathway = db.scalar(
+        select(PathwayRecommendation)
+        .where(
+            PathwayRecommendation.student_id == student.id,
+            PathwayRecommendation.active.is_(True),
+            PathwayRecommendation.selected.is_(True),
+        )
+        .order_by(PathwayRecommendation.created_at.desc())
+    )
+    next_step = (
+        db.scalar(
+            select(PathwayStep)
+            .where(
+                PathwayStep.pathway_id == selected_pathway.id,
+                PathwayStep.completed_at.is_(None),
+            )
+            .order_by(PathwayStep.position)
+        )
+        if selected_pathway
+        else None
+    )
     nodes = []
     for concept_id in topological_order(node_ids, edge_tuples):
         concept = db.get(Concept, concept_id)
         record = mastery.get(concept_id)
+        response_summary = db.execute(
+            select(
+                func.count(ItemResponse.id),
+                func.sum(func.cast(ItemResponse.is_correct, Integer)),
+                func.sum(ItemResponse.response_seconds),
+                func.max(AssessmentAttempt.submitted_at),
+                func.count(func.distinct(AssessmentAttempt.id)),
+            )
+            .join(Question, Question.id == ItemResponse.question_id)
+            .join(AssessmentAttempt, AssessmentAttempt.id == ItemResponse.attempt_id)
+            .where(
+                AssessmentAttempt.student_id == student.id,
+                Question.concept_id == concept_id,
+            )
+        ).one()
+        response_count = int(response_summary[0] or 0)
+        correct_count = int(response_summary[1] or 0)
+        is_gap = bool(record and record.mastery_score < threshold)
+        is_recommended = bool(next_step and next_step.concept_id == concept_id)
+        is_target = concept_id == profile.target_concept_id
+        state = (
+            "gap"
+            if is_gap
+            else "mastered"
+            if record and record.mastery_score >= threshold
+            else "target"
+            if is_recommended or is_target
+            else "unassessed"
+        )
         nodes.append(
             {
                 **concept_payload(concept),
                 "mastery_score": record.mastery_score if record else None,
                 "classification": record.classification if record else "Not Yet Assessed",
-                "is_target": concept_id == profile.target_concept_id,
-                "is_gap": bool(record and record.mastery_score < threshold),
+                "mastery_threshold": threshold,
+                "is_target": is_target,
+                "is_recommended": is_recommended,
+                "is_gap": is_gap,
+                "state": state,
+                "mastery_evidence": {
+                    "response_count": response_count,
+                    "correct_count": correct_count,
+                    "incorrect_count": max(0, response_count - correct_count),
+                    "attempt_count": int(response_summary[4] or 0),
+                    "total_response_seconds": float(response_summary[2] or 0),
+                    "latest_evidence_date": (
+                        response_summary[3].isoformat() if response_summary[3] else None
+                    ),
+                    "mastery_record_date": (
+                        record.created_at.isoformat() if record else None
+                    ),
+                },
+                "target_reason": (
+                    (next_step.selection_reason if is_recommended else None)
+                    or (
+                        (selected_pathway.decision_explanation or {}).get("selection_reason")
+                        if is_target and selected_pathway
+                        else None
+                    )
+                    or ("This is your currently selected target concept." if is_target else None)
+                ),
             }
         )
     return {
@@ -3419,6 +3495,200 @@ def student_graph(
             and edge.succeeding_concept_id in node_ids
         ],
     }
+
+
+@app.post("/api/student/graph/gaps/{concept_id}/diagnosis")
+def diagnose_student_gap(
+    concept_id: int,
+    db: Session = Depends(get_db),
+    student: User = Depends(require_role("student")),
+):
+    concept = db.get(Concept, concept_id)
+    mastery = latest_mastery_map(db, student.id).get(concept_id)
+    threshold = float(get_setting(db, "mastery_threshold"))
+    gap = db.scalar(
+        select(LearningGap)
+        .where(
+            LearningGap.student_id == student.id,
+            LearningGap.concept_id == concept_id,
+            LearningGap.resolved_at.is_(None),
+        )
+        .order_by(LearningGap.created_at.desc())
+    )
+    if not concept or not mastery or mastery.mastery_score >= threshold or not gap:
+        raise HTTPException(status_code=404, detail="Active learning gap not found")
+
+    prerequisite_rows = list(
+        db.execute(
+            select(PrerequisiteEdge, Concept)
+            .join(Concept, Concept.id == PrerequisiteEdge.prerequisite_concept_id)
+            .where(
+                PrerequisiteEdge.succeeding_concept_id == concept_id,
+                PrerequisiteEdge.active.is_(True),
+            )
+        ).all()
+    )
+    response_rows = list(
+        db.execute(
+            select(ItemResponse, AssessmentAttempt, Question)
+            .join(AssessmentAttempt, AssessmentAttempt.id == ItemResponse.attempt_id)
+            .join(Question, Question.id == ItemResponse.question_id)
+            .where(
+                AssessmentAttempt.student_id == student.id,
+                Question.concept_id == concept_id,
+            )
+            .order_by(AssessmentAttempt.submitted_at.desc(), ItemResponse.id.desc())
+            .limit(50)
+        ).all()
+    )
+    attempts = {attempt.id: attempt for _, attempt, _ in response_rows}
+    latest_evidence_date = max(
+        [attempt.submitted_at for attempt in attempts.values()] + [mastery.created_at]
+    )
+    incorrect = sum(1 for response, _, _ in response_rows if not response.is_correct)
+    correct = len(response_rows) - incorrect
+
+    prediction = db.scalar(
+        select(CognitiveLoadPrediction)
+        .where(
+            CognitiveLoadPrediction.student_id == student.id,
+            CognitiveLoadPrediction.is_demo == student.is_demo,
+        )
+        .order_by(CognitiveLoadPrediction.evidence_date.desc())
+    )
+    if prediction is None:
+        try:
+            generated = predict_student_cognitive_load(db, student.id)
+            if generated.get("available"):
+                prediction = db.get(CognitiveLoadPrediction, generated["prediction_id"])
+        except ValueError:
+            prediction = None
+    model = db.get(ModelVersion, prediction.model_version_id) if prediction else None
+
+    pathway = db.scalar(
+        select(PathwayRecommendation)
+        .where(
+            PathwayRecommendation.student_id == student.id,
+            PathwayRecommendation.active.is_(True),
+            PathwayRecommendation.selected.is_(True),
+        )
+        .order_by(PathwayRecommendation.created_at.desc())
+    )
+    step = (
+        db.scalar(
+            select(PathwayStep)
+            .where(PathwayStep.pathway_id == pathway.id, PathwayStep.completed_at.is_(None))
+            .order_by(PathwayStep.position)
+        )
+        if pathway
+        else None
+    )
+    activity = db.get(Activity, step.activity_id) if step else None
+    reliable = bool(response_rows and prediction and model)
+    prerequisite_payload = []
+    mastery_map = latest_mastery_map(db, student.id)
+    for edge, prerequisite in prerequisite_rows:
+        prerequisite_mastery = mastery_map.get(prerequisite.id)
+        prerequisite_payload.append(
+            {
+                "id": prerequisite.id,
+                "code": prerequisite.code,
+                "name": prerequisite.name,
+                "mastery_score": (
+                    prerequisite_mastery.mastery_score if prerequisite_mastery else None
+                ),
+                "edge_id": edge.id,
+            }
+        )
+    evidence = {
+        "response_count": len(response_rows),
+        "correct_count": correct,
+        "incorrect_count": incorrect,
+        "attempt_count": len(attempts),
+        "scores": [
+            {
+                "attempt_id": attempt.id,
+                "score": attempt.score,
+                "max_score": attempt.max_score,
+                "accuracy": attempt.accuracy,
+                "completion_seconds": attempt.total_seconds,
+                "submitted_at": attempt.submitted_at.isoformat(),
+            }
+            for attempt in attempts.values()
+        ],
+        "mastery_score": mastery.mastery_score,
+        "mastery_threshold": threshold,
+        "latest_evidence_date": latest_evidence_date.isoformat(),
+    }
+    payload = {
+        "status": "reliable" if reliable else "insufficient",
+        "message": (
+            None
+            if reliable
+            else "Not enough learner evidence for a reliable diagnosis."
+        ),
+        "selected_learning_gap": {
+            "concept_id": concept.id,
+            "code": concept.code,
+            "name": concept.name,
+            "reason": gap.reason,
+        },
+        "prerequisites": prerequisite_payload,
+        "evidence": evidence,
+        "predicted_cognitive_load": (
+            {
+                "level": prediction.predicted_category,
+                "expected_index": prediction.expected_index,
+                "probabilities": prediction.probabilities,
+                "why": (
+                    f"The stored {prediction.predicted_category} probability is the largest "
+                    "model probability for the learner evidence dated "
+                    f"{prediction.evidence_date.isoformat()}."
+                ),
+            }
+            if prediction
+            else None
+        ),
+        "model_version": model.version if model else None,
+        "why_gap": (
+            f"Current mastery is {mastery.mastery_score:.1%}, below the configured "
+            f"{threshold:.1%} threshold. The stored item evidence contains {incorrect} "
+            f"incorrect response(s) across {len(attempts)} attempt(s)."
+        ),
+        "recommended_next": (
+            {
+                "activity_id": activity.id,
+                "title": activity.title,
+                "pathway_id": pathway.id,
+                "reason": step.selection_reason,
+            }
+            if activity and pathway and step
+            else None
+        ),
+    }
+    diagnosis = GapDiagnosis(
+        student_id=student.id,
+        concept_id=concept.id,
+        status=payload["status"],
+        diagnosis=payload,
+        evidence_date=latest_evidence_date,
+        model_version_id=model.id if model else None,
+        recommended_activity_id=activity.id if activity else None,
+        is_demo=student.is_demo,
+    )
+    db.add(diagnosis)
+    db.flush()
+    audit(
+        db,
+        student.id,
+        "student.gap_diagnosis.created",
+        "gap_diagnosis",
+        diagnosis.id,
+        {"concept_id": concept.id, "status": payload["status"]},
+    )
+    db.commit()
+    db.refresh(diagnosis)
+    return {"id": diagnosis.id, "created_at": diagnosis.created_at, **payload}
 
 
 @app.get("/api/student/history")
@@ -6122,7 +6392,7 @@ def update_settings(
 
 @app.post("/api/teacher/models/train")
 def train_model(
-    mode: str = Query(default="demo", pattern="^(demo|research)$"),
+    mode: str = Query(default="research", pattern="^(demo|research)$"),
     db: Session = Depends(get_db),
     teacher: User = Depends(require_role("teacher")),
 ):
@@ -6145,6 +6415,7 @@ def train_model(
 
 @app.get("/api/teacher/models")
 def model_versions(
+    mode: str | None = Query(default=None, pattern="^(demo|research)$"),
     db: Session = Depends(get_db), _teacher: User = Depends(require_role("teacher"))
 ):
     return [
@@ -6168,9 +6439,55 @@ def model_versions(
             "active": version.active,
         }
         for version in db.scalars(
-            select(ModelVersion).order_by(ModelVersion.trained_at.desc())
+            (
+                select(ModelVersion).where(ModelVersion.is_demo == (mode == "demo"))
+                if mode
+                else select(ModelVersion)
+            ).order_by(ModelVersion.trained_at.desc())
         )
     ]
+
+
+@app.get("/api/teacher/models/evaluation-status")
+def model_evaluation_status(
+    db: Session = Depends(get_db), _teacher: User = Depends(require_role("teacher"))
+):
+    labeled = list(
+        db.execute(
+            select(InteractionLog.student_id, MentalEffortRating.category)
+            .join(User, User.id == InteractionLog.student_id)
+            .join(MentalEffortRating, MentalEffortRating.attempt_id == InteractionLog.attempt_id)
+            .where(
+                User.is_demo.is_(False),
+                InteractionLog.is_demo.is_(False),
+                MentalEffortRating.is_demo.is_(False),
+                User.is_active.is_(True),
+                User.account_status == "Active",
+            )
+        ).all()
+    )
+    distribution: dict[str, int] = {"Low": 0, "Moderate": 0, "High": 0}
+    for _, category in labeled:
+        distribution[category] = distribution.get(category, 0) + 1
+    learners = len({student_id for student_id, _ in labeled})
+    available = len(labeled) >= 12 and learners >= 3 and all(distribution.get(label, 0) for label in ("Low", "Moderate", "High"))
+    return {
+        "real_learners": learners,
+        "labeled_records": len(labeled),
+        "class_distribution": distribution,
+        "evaluation_available": available,
+        "requirements": {
+            "minimum_labeled_records": 12,
+            "minimum_learners": 3,
+            "required_labels": ["Low", "Moderate", "High"],
+            "evaluation_method": "Student-grouped cross-validation",
+        },
+        "message": (
+            None
+            if available
+            else "Evaluation is unavailable until at least 12 real labeled interaction records from at least 3 learners include Low, Moderate, and High cognitive-load labels."
+        ),
+    }
 
 
 @app.get("/api/teacher/models/predict")
@@ -6194,7 +6511,7 @@ def diagnose_all_active_students(
         User.role == "student",
         User.is_active.is_(True),
         User.account_status == "Active",
-        User.is_demo == teacher.is_demo,
+        User.is_demo.is_(False),
     ).order_by(User.participant_code)))
     results = []
     for student in students:

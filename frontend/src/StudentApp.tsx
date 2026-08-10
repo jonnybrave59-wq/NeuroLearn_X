@@ -80,7 +80,7 @@ const navigation = [
   ["Choose target", "/student/targets", Target],
   ["Mastery & gaps", "/student/mastery", Gauge],
   ["Learning pathway", "/student/pathway", Route],
-  ["Prerequisite map", "/student/map", MapIcon],
+  ["Knowledge Graph Gaps", "/student/map", MapIcon],
   ["Explanation", "/student/explanation", Sparkles],
   ["Progress history", "/student/history", History],
   ["Profile & password", "/student/profile", UserRound],
@@ -2325,6 +2325,9 @@ function PathwayPage({
 function PrerequisiteMap() {
   const [graph, setGraph] = useState<any>(null);
   const [error, setError] = useState("");
+  const [selectedNode, setSelectedNode] = useState<any>(null);
+  const [diagnosis, setDiagnosis] = useState<any>(null);
+  const [diagnosisLoading, setDiagnosisLoading] = useState(false);
   useEffect(() => {
     api("/api/student/graph")
       .then(setGraph)
@@ -2370,19 +2373,12 @@ function PrerequisiteMap() {
         },
         style: {
           borderRadius: 14,
-          border: node.is_target
-            ? "2px solid #0bb7c9"
-            : node.is_gap
-              ? "2px solid #fb7185"
-              : "1px solid #dbe4ea",
-          background: node.is_target
-            ? "#071b34"
-            : node.is_gap
-              ? "#fff1f2"
-              : "#ffffff",
-          color: node.is_target ? "white" : "#071b34",
+          border: `2px solid ${node.state === "mastered" ? "#059669" : node.state === "gap" ? "#dc2626" : node.state === "target" ? "#2563eb" : "#94a3b8"}`,
+          background: node.state === "mastered" ? "#ecfdf5" : node.state === "gap" ? "#fef2f2" : node.state === "target" ? "#eff6ff" : "#f8fafc",
+          color: "#071b34",
           padding: 14,
           boxShadow: "0 8px 24px rgba(7,27,52,.08)",
+          cursor: "pointer",
         },
       };
     });
@@ -2396,15 +2392,36 @@ function PrerequisiteMap() {
     }));
     return { nodes, edges };
   }, [graph]);
+  async function openNode(nodeId: string) {
+    const node = graph.nodes.find((item: any) => String(item.id) === nodeId);
+    setSelectedNode(node || null);
+    setDiagnosis(null);
+    setError("");
+    if (node?.state !== "gap") return;
+    setDiagnosisLoading(true);
+    try {
+      setDiagnosis(await post(`/api/student/graph/gaps/${node.id}/diagnosis`, {}));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setDiagnosisLoading(false);
+    }
+  }
   if (error) return <ErrorNotice message={error} />;
   if (!graph) return <Loading label="Tracing prerequisite ancestors…" />;
   return (
     <>
       <PageHeader
         eyebrow="Educational knowledge graph"
-        title="Interactive prerequisite map"
-        description="Arrows point from foundational concepts to the concepts that depend on them. Pink nodes are assessed gaps; dark navy is your target."
+        title="Knowledge Graph & Prerequisite Gap Diagnosis"
+        description="Arrows point from a prerequisite concept to the succeeding concept. Select a node to inspect the learner evidence or open an XAI diagnosis."
       />
+      <div className="mb-4 flex flex-wrap gap-3 rounded-2xl bg-white p-4 text-xs font-bold text-slate-700 shadow-soft" aria-label="Knowledge graph color legend">
+        <span className="inline-flex items-center gap-2"><i className="h-3 w-3 rounded-full bg-emerald-600" /> Green: Mastered concept</span>
+        <span className="inline-flex items-center gap-2"><i className="h-3 w-3 rounded-full bg-red-600" /> Red: Identified learning gap</span>
+        <span className="inline-flex items-center gap-2"><i className="h-3 w-3 rounded-full bg-blue-600" /> Blue: Recommended next or target concept</span>
+        <span className="inline-flex items-center gap-2"><i className="h-3 w-3 rounded-full bg-slate-400" /> Gray: Not yet assessed</span>
+      </div>
       {!graph.nodes.length ? (
         <Empty
           title="Choose a target first"
@@ -2418,11 +2435,49 @@ function PrerequisiteMap() {
             fitView
             minZoom={0.4}
             maxZoom={1.6}
+            onNodeClick={(_event, node) => void openNode(node.id)}
           >
             <Background gap={24} color="#dbe4ea" />
             <Controls />
           </ReactFlow>
         </div>
+      )}
+      {selectedNode && (
+        <section className="mt-6 rounded-2xl bg-white p-6 shadow-soft">
+          <div className="flex items-start justify-between gap-4">
+            <div><div className="text-xs font-black uppercase tracking-widest text-cyanx-700">{selectedNode.code}</div><h2 className="mt-1 text-xl font-black text-navy-950">{selectedNode.name}</h2></div>
+            <button type="button" className="icon-button" aria-label="Close node evidence" onClick={() => { setSelectedNode(null); setDiagnosis(null); }}><X size={17} /></button>
+          </div>
+          {selectedNode.state === "mastered" && (
+            <div className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50 p-5 text-sm text-emerald-950">
+              <h3 className="font-black">Mastery evidence</h3>
+              <p className="mt-2">Mastery is {(selectedNode.mastery_score * 100).toFixed(1)}%, meeting the {(selectedNode.mastery_threshold * 100).toFixed(1)}% threshold.</p>
+              <p className="mt-2">{selectedNode.mastery_evidence.correct_count} correct of {selectedNode.mastery_evidence.response_count} stored responses across {selectedNode.mastery_evidence.attempt_count} attempt(s).</p>
+              <p className="mt-2 text-xs">Latest evidence: {selectedNode.mastery_evidence.latest_evidence_date ? new Date(selectedNode.mastery_evidence.latest_evidence_date).toLocaleString() : "Not available"}</p>
+            </div>
+          )}
+          {selectedNode.state === "target" && (
+            <div className="mt-5 rounded-xl border border-blue-200 bg-blue-50 p-5 text-sm text-blue-950"><h3 className="font-black">Why this is the next target</h3><p className="mt-2">{selectedNode.target_reason}</p></div>
+          )}
+          {selectedNode.state === "unassessed" && <p className="mt-5 rounded-xl bg-slate-50 p-5 text-sm text-slate-700">No saved mastery evidence is available for this concept yet.</p>}
+          {selectedNode.state === "gap" && diagnosisLoading && <Loading label="Generating XAI diagnosis from saved learner evidenceâ€¦" />}
+          {selectedNode.state === "gap" && diagnosis && (
+            <div className="mt-5 space-y-5">
+              <div className="rounded-xl border border-red-200 bg-red-50 p-5"><h3 className="font-black text-red-950">XAI Diagnosis</h3><p className="mt-2 text-sm text-red-900">{diagnosis.message || diagnosis.why_gap}</p></div>
+              <dl className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                <div><dt className="text-xs font-bold uppercase text-slate-400">Learning gap</dt><dd className="mt-1 font-black text-navy-950">{diagnosis.selected_learning_gap.name}</dd></div>
+                <div><dt className="text-xs font-bold uppercase text-slate-400">Mastery</dt><dd className="mt-1 font-black text-navy-950">{(diagnosis.evidence.mastery_score * 100).toFixed(1)}% / {(diagnosis.evidence.mastery_threshold * 100).toFixed(1)}%</dd></div>
+                <div><dt className="text-xs font-bold uppercase text-slate-400">Predicted load</dt><dd className="mt-1 font-black text-navy-950">{diagnosis.predicted_cognitive_load?.level || "Unavailable"}</dd></div>
+                <div><dt className="text-xs font-bold uppercase text-slate-400">Model version</dt><dd className="mt-1 font-black text-navy-950">{diagnosis.model_version || "Unavailable"}</dd></div>
+              </dl>
+              <section><h3 className="font-black text-navy-950">Prerequisite concepts involved</h3><ul className="mt-2 grid gap-2 sm:grid-cols-2">{diagnosis.prerequisites.length ? diagnosis.prerequisites.map((item: any) => <li key={item.id} className="rounded-lg bg-slate-50 p-3 text-sm"><strong>{item.code} Â· {item.name}</strong><span className="block text-xs text-slate-500">Mastery: {item.mastery_score == null ? "Not assessed" : `${(item.mastery_score * 100).toFixed(1)}%`}</span></li>) : <li className="text-sm text-slate-500">No direct prerequisite edge is stored.</li>}</ul></section>
+              <section className="rounded-xl bg-slate-50 p-5 text-sm"><h3 className="font-black text-navy-950">Actual learner evidence</h3><p className="mt-2">{diagnosis.evidence.correct_count} correct and {diagnosis.evidence.incorrect_count} incorrect responses across {diagnosis.evidence.attempt_count} attempt(s).</p>{diagnosis.evidence.scores.map((attempt: any) => <p key={attempt.attempt_id} className="mt-2">Attempt {attempt.attempt_id}: {attempt.score}/{attempt.max_score}, {(attempt.accuracy * 100).toFixed(1)}%, {(attempt.completion_seconds / 60).toFixed(1)} min Â· {new Date(attempt.submitted_at).toLocaleString()}</p>)}</section>
+              {diagnosis.predicted_cognitive_load && <section className="rounded-xl bg-cyan-50 p-5 text-sm text-cyan-950"><h3 className="font-black">Why cognitive load was predicted</h3><p className="mt-2">{diagnosis.predicted_cognitive_load.why}</p></section>}
+              {diagnosis.recommended_next && <section className="rounded-xl bg-blue-50 p-5 text-sm text-blue-950"><h3 className="font-black">Recommended next activity</h3><p className="mt-2">{diagnosis.recommended_next.title}</p><p className="mt-1 text-xs">{diagnosis.recommended_next.reason}</p><Link className="btn-primary mt-4 inline-flex" to={`/student/activity/${diagnosis.recommended_next.activity_id}`}>Open activity <ArrowRight size={16} /></Link></section>}
+              <p className="text-xs text-slate-500">Latest evidence date: {new Date(diagnosis.evidence.latest_evidence_date).toLocaleString()} Â· Saved diagnosis #{diagnosis.id}</p>
+            </div>
+          )}
+        </section>
       )}
     </>
   );

@@ -527,6 +527,22 @@ class CognitiveLoadPrediction(Base, TimestampMixin):
     is_demo: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
 
+class GapDiagnosis(Base, TimestampMixin):
+    __tablename__ = "gap_diagnoses"
+    __table_args__ = (
+        Index("ix_gap_diagnoses_student_concept_created", "student_id", "concept_id", "created_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    concept_id: Mapped[int] = mapped_column(ForeignKey("concepts.id"), index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    diagnosis: Mapped[dict] = mapped_column(JSON, default=dict)
+    evidence_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    model_version_id: Mapped[int | None] = mapped_column(ForeignKey("model_versions.id"))
+    recommended_activity_id: Mapped[int | None] = mapped_column(ForeignKey("activities.id"))
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+
 class SystemSetting(Base, TimestampMixin):
     __tablename__ = "system_settings"
     id: Mapped[int] = mapped_column(primary_key=True)
