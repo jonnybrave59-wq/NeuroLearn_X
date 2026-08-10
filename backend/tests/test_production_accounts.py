@@ -36,7 +36,7 @@ def test_configured_secrets_are_authoritative_for_demo_accounts():
     assert verify_password("Current!Student1", student.password_hash)
 
 
-def test_no_teacher_record_is_created_or_changed_when_reserved_account_is_absent():
+def test_reserved_teacher_is_created_when_missing():
     db = MagicMock()
     db.scalar.return_value = None
     db.scalars.return_value = []
@@ -47,5 +47,9 @@ def test_no_teacher_record_is_created_or_changed_when_reserved_account_is_absent
         "Configured!Student1",
     )
 
-    assert changed == 0
-    db.add.assert_not_called()
+    assert changed == 1
+    created = db.add.call_args_list[0].args[0]
+    assert created.participant_code == "TEACHER01"
+    assert created.role == "teacher"
+    assert created.is_demo is True
+    assert verify_password("Configured!Teacher1", created.password_hash)

@@ -40,13 +40,34 @@ def synchronize_demo_credentials(
     teacher = db.scalar(
         select(User).where(
             User.participant_code == "TEACHER01",
-            User.role == "teacher",
         )
     )
-    if (
-        teacher
-        and not verify_password(teacher_password, teacher.password_hash)
-    ):
+    if teacher is None:
+        teacher = User(
+            participant_code="TEACHER01",
+            password_hash=hash_password(teacher_password),
+            role="teacher",
+            display_name="Research Teacher",
+            must_change_password=False,
+            is_active=True,
+            is_demo=True,
+            account_status="Active",
+        )
+        db.add(teacher)
+        db.flush()
+        db.add(
+            AuditLog(
+                actor_id=None,
+                action="account.production_reserved_created",
+                entity_type="user",
+                entity_id=str(teacher.id),
+                details={"account": "teacher-demo"},
+            )
+        )
+        rotated += 1
+    elif teacher.role != "teacher":
+        raise RuntimeError("Reserved participant code TEACHER01 has the wrong role")
+    elif not verify_password(teacher_password, teacher.password_hash):
         teacher.password_hash = hash_password(teacher_password)
         db.add(
             AuditLog(
