@@ -16,6 +16,5 @@ dependencies = [
   "numpy==2.3.2",
   "scikit-learn==1.7.1",
   "joblib==1.5.2",
-  "shap==0.48.0",
   "httpx==0.28.1"
 ]
