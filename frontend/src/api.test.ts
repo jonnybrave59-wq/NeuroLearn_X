@@ -87,6 +87,39 @@ describe("API client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("waits for the API and safely retries a login that receives the wake page", async () => {
+    const loginPayload = { user: { role: "student" } };
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response("<html><title>Render - Application loading</title></html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(healthPayload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(loginPayload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+    await expect(
+      api("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ participant_code: "STUDENT", password: "Secure!123" }),
+      }),
+    ).resolves.toEqual(loginPayload);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(currentConnectionState().kind).toBe("online");
+  });
+
   it("distinguishes a stopped same-origin backend from an offline device", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("Failed to fetch"));
     await expect(api("/api/student/dashboard")).rejects.toMatchObject({

@@ -18,6 +18,7 @@ const COLD_START_RETRY_DELAYS_MS =
 
 type ApiRequestOptions = RequestInit & {
   suppressSessionExpiry?: boolean;
+  retryAfterColdStart?: boolean;
 };
 
 let healthProbeInFlight: Promise<ConnectionState> | null = null;
@@ -244,7 +245,11 @@ export async function api<T = any>(
     throw connectionApiError(state);
   }
 
-  const { suppressSessionExpiry = false, ...requestOptions } = options;
+  const {
+    suppressSessionExpiry = false,
+    retryAfterColdStart = true,
+    ...requestOptions
+  } = options;
   const headers = new Headers(requestOptions.headers);
   if (requestOptions.body && !(requestOptions.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
@@ -269,6 +274,29 @@ export async function api<T = any>(
     throw connectionApiError(state);
   } finally {
     if (timeout !== null) globalThis.clearTimeout(timeout);
+  }
+
+  const contentType = response.headers.get("Content-Type") || "";
+  if (
+    response.ok &&
+    response.status !== 204 &&
+    !contentType.toLowerCase().includes("application/json")
+  ) {
+    // Render's free-tier wake page is HTML with status 200. This can affect
+    // login, registration, and dashboard routes as well as /api/health. Wait
+    // for the real API, then replay the request once. The wake page means the
+    // application never received the original request.
+    const state = await diagnoseConnection({ force: true });
+    if (state.kind === "online" && retryAfterColdStart) {
+      return api<T>(path, {
+        ...requestOptions,
+        suppressSessionExpiry,
+        retryAfterColdStart: false,
+      });
+    }
+    if (state.kind !== "online") throw connectionApiError(state);
+    const configurationState = setConnectionState("configuration-error");
+    throw connectionApiError(configurationState);
   }
 
   const connectionState = reportReachableResponse(

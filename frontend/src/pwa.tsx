@@ -410,7 +410,10 @@ function UpdatePrompt() {
     setUpdater(() => updater);
     return unsubscribe;
   }, []);
-  if (connection.kind !== "online" || (!needRefresh && !offlineReady)) return null;
+  // A pending update must remain available even when an older app bundle is
+  // showing a server warning. Otherwise an installed PWA can trap the learner
+  // on the very release that needs replacing.
+  if (!needRefresh && (connection.kind !== "online" || !offlineReady)) return null;
   return (
     <div className="fixed bottom-4 right-4 z-[90] max-w-sm rounded-2xl border border-cyan-200 bg-white p-4 text-sm shadow-2xl">
       <div className="font-black text-navy-950">
