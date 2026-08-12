@@ -12,7 +12,9 @@ export { API_BASE, apiUrl };
 const API_TIMEOUT_MS = 12_000;
 const HEALTH_TIMEOUT_MS = 12_000;
 const COLD_START_RETRY_DELAYS_MS =
-  import.meta.env.MODE === "test" ? [0] : [0, 3_000, 6_000, 9_000];
+  import.meta.env.MODE === "test"
+    ? [0]
+    : [0, 5_000, 10_000, 15_000, 20_000, 20_000];
 
 type ApiRequestOptions = RequestInit & {
   suppressSessionExpiry?: boolean;
@@ -164,9 +166,21 @@ export async function diagnoseConnection(
           try {
             payload = (await response.json()) as { status?: string; service?: string };
           } catch {
+            // Render Free returns a temporary HTML "Application loading" page
+            // with HTTP 200 while the instance wakes. It is reachable, but it
+            // is not the API yet, so keep the single cold-start status visible
+            // and retry at the normal spaced intervals.
+            if (attempt < retryDelays.length - 1) {
+              setConnectionState("server-starting");
+              continue;
+            }
             return setConnectionState("configuration-error");
           }
           if (payload.status !== "ok" || payload.service !== "NeuroLearn-X API") {
+            if (attempt < retryDelays.length - 1) {
+              setConnectionState("server-starting");
+              continue;
+            }
             return setConnectionState("configuration-error");
           }
           return setConnectionState("online");

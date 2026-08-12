@@ -65,6 +65,28 @@ describe("API client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("retries Render's temporary 200 HTML loading page", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response("<html><title>Render - Application loading</title></html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(healthPayload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+    await expect(
+      diagnoseConnection({ retryDelaysMs: [0, 0] }),
+    ).resolves.toMatchObject({ kind: "online" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("distinguishes a stopped same-origin backend from an offline device", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("Failed to fetch"));
     await expect(api("/api/student/dashboard")).rejects.toMatchObject({
