@@ -376,7 +376,9 @@ def _seed_tutoring_metadata(db: Session, concepts: dict[str, Concept]) -> None:
     db.commit()
 
 
-def _seed_content(db: Session) -> dict[str, Concept]:
+def _seed_content(
+    db: Session, *, content_is_demo: bool = True
+) -> dict[str, Concept]:
     concepts: dict[str, Concept] = {}
     for code, name, subject, difficulty, description in CONCEPTS:
         concept = db.scalar(select(Concept).where(Concept.code == code))
@@ -456,7 +458,7 @@ def _seed_content(db: Session) -> dict[str, Concept]:
                 instructions="Read each item carefully. Hints are available and their use is recorded.",
                 active=True,
                 is_diagnostic=diagnostic,
-                is_demo=True,
+                is_demo=content_is_demo,
             )
             db.add(activity)
             db.flush()
@@ -487,6 +489,16 @@ def _seed_content(db: Session) -> dict[str, Concept]:
                     )
     db.commit()
     return concepts
+
+
+def ensure_reference_curriculum(db: Session) -> Activity | None:
+    """Install only the authored curriculum needed by real learner workflows.
+
+    This does not create demo users, attempts, mastery, model metrics, or
+    pathways. Existing records and teacher-authored activities are preserved.
+    """
+    _seed_content(db, content_is_demo=False)
+    return ensure_onboarding_diagnostic(db)
 
 
 def _seed_users_and_history(db: Session, concepts: dict[str, Concept]) -> None:

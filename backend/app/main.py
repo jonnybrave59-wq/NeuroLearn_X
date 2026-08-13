@@ -223,7 +223,46 @@ async def lifespan(_app: FastAPI):
     if os.getenv("CREATE_TABLES_ON_STARTUP", "1") == "1":
         Base.metadata.create_all(engine)
     with SessionLocal() as db:
-        diagnostic = ensure_onboarding_diagnostic(db)
+        advisory_lock_key = 5_821_030_030
+        lock_held = False
+        if PRODUCTION:
+            # Vercel can start several function workers together. A session
+            # advisory lock keeps the one-time account/content bootstrap safe
+            # without deleting or replacing any existing production records.
+            db.execute(
+                text("SELECT pg_advisory_lock(:key)"),
+                {"key": advisory_lock_key},
+            )
+            lock_held = True
+        try:
+            if PRODUCTION:
+                from .production_accounts import (
+                    required_password,
+                    synchronize_demo_credentials,
+                )
+
+                teacher_password = required_password("PRODUCTION_TEACHER_PASSWORD")
+                student_password = required_password(
+                    "PRODUCTION_DEMO_STUDENT_PASSWORD"
+                )
+                synchronize_demo_credentials(
+                    db,
+                    teacher_password,
+                    student_password,
+                )
+                db.commit()
+
+            diagnostic = ensure_onboarding_diagnostic(db)
+            if diagnostic is None and PRODUCTION:
+                from .seed import ensure_reference_curriculum
+
+                diagnostic = ensure_reference_curriculum(db)
+        finally:
+            if lock_held:
+                db.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": advisory_lock_key},
+                )
         if diagnostic is None:
             logger.warning(
                 "The onboarding diagnostic could not be prepared because 30 eligible "
@@ -238,7 +277,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="NeuroLearn-X API",
-    version="1.3.7",
+    version="1.3.8",
     description="Explainable adaptive learning research prototype.",
     lifespan=lifespan,
 )
@@ -2265,7 +2304,7 @@ def health(response: Response):
         "status": "ok",
         "service": "NeuroLearn-X API",
         "name": "NeuroLearn-X",
-        "version": "1.3.7",
+        "version": "1.3.8",
         "mode": "research prototype",
     }
 
