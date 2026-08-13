@@ -413,15 +413,21 @@ export async function api<T = any>(
     } catch {
       // The generic message remains useful for non-JSON failures.
     }
-    logApiFailure({
-      phase: "api-request",
-      url: requestUrl,
-      method: requestMethod,
-      durationMs: Date.now() - startedAt,
-      status: response.status,
-      statusText: response.statusText,
-      reason: "API returned an error response",
-    });
+    const expectedSignedOutProbe =
+      suppressSessionExpiry &&
+      path === "/api/auth/me" &&
+      (response.status === 401 || response.status === 403);
+    if (!expectedSignedOutProbe) {
+      logApiFailure({
+        phase: "api-request",
+        url: requestUrl,
+        method: requestMethod,
+        durationMs: Date.now() - startedAt,
+        status: response.status,
+        statusText: response.statusText,
+        reason: "API returned an error response",
+      });
+    }
     const isExpired = connectionState.kind === "session-expired";
     throw new ApiError(
       isExpired ? connectionState.message : detail,

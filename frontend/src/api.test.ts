@@ -180,6 +180,21 @@ describe("API client", () => {
     }
   });
 
+  it("does not log the expected signed-out auth probe as a server failure", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Sign in required" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await expect(
+      api("/api/auth/me", { suppressSessionExpiry: true }),
+    ).rejects.toMatchObject({ status: 401 });
+    expect(console.error).not.toHaveBeenCalled();
+    expect(currentConnectionState().kind).toBe("online");
+  });
+
   it("does not label reachable 404 or 500 responses as no internet", async () => {
     for (const status of [404, 500]) {
       resetConnectionStateForTests();

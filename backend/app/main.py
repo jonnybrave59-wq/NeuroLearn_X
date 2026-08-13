@@ -277,7 +277,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="NeuroLearn-X API",
-    version="1.3.8",
+    version="1.3.9",
     description="Explainable adaptive learning research prototype.",
     lifespan=lifespan,
 )
@@ -2304,7 +2304,7 @@ def health(response: Response):
         "status": "ok",
         "service": "NeuroLearn-X API",
         "name": "NeuroLearn-X",
-        "version": "1.3.8",
+        "version": "1.3.9",
         "mode": "research prototype",
     }
 

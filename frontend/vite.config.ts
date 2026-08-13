@@ -53,7 +53,7 @@ export default defineConfig({
         ],
       },
       workbox: {
-        cacheId: "neurolearnx-v1.3.8",
+        cacheId: "neurolearnx-v1.3.9",
         cleanupOutdatedCaches: true,
         clientsClaim: true,
         skipWaiting: true,
