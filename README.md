@@ -281,12 +281,12 @@ offline notice. Sign-in, identities, dashboards, pathways, progress,
 assessments, and all teacher/ML operations require a live server. Legacy
 NeuroLearn-X IndexedDB data is removed automatically.
 
-## Render deployment
+## Vercel deployment
 
-The root `render.yaml` creates one Docker web service and PostgreSQL in the same
-region. The Docker image builds the PWA, validates production settings, applies
-Alembic migrations, and serves the real application directly from FastAPI.
-Follow [`DEPLOYMENT.md`](DEPLOYMENT.md).
+The existing Vercel Services project builds the React PWA and FastAPI backend
+in one deployment. Same-origin `/api` requests route directly to the FastAPI
+service, which uses the preserved PostgreSQL database configured by
+`DATABASE_URL`. Follow [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## Android wrapper
 
@@ -379,6 +379,5 @@ build also validates TypeScript and the service-worker precache.
 - SHAP is applied to the Random Forest component for the predicted class; the displayed ensemble probability still combines all three classifiers equally. When SHAP cannot be computed, the fallback is labeled approximate.
 - Offline mode displays only the public app shell; it never exposes cached identities, dashboards, pathways, progress, assessments, or teacher records.
 - iPhone/iPad installation uses Safari's Add to Home Screen menu because iOS does not provide the Chromium install-prompt event.
-- A public Render URL and Android APK remain external artifacts until the repository
-  is connected to an authenticated Render/GitHub account and the corresponding
-  cloud builds complete against that HTTPS URL.
+- The Android APK remains an external artifact until its signed build and
+  physical-device checks are completed against the production HTTPS URL.

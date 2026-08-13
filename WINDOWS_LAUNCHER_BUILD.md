@@ -6,9 +6,9 @@ bearing, query-string, or fragment URLs.
 
 ## Before running the workflow
 
-1. Deploy NeuroLearn-X to its permanent Render HTTPS URL.
+1. Deploy NeuroLearn-X to its permanent Vercel HTTPS URL.
 2. Verify:
-   - `https://<deployment>/api/health/ready`
+   - `https://<deployment>/api/ready`
    - `https://<deployment>/#/`
 3. Push this complete source project to GitHub.
 

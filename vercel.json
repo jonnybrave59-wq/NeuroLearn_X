@@ -24,11 +24,15 @@
   "rewrites": [
     {
       "source": "/api",
-      "destination": "https://neurolearn-x.onrender.com/api"
+      "destination": {
+        "service": "backend"
+      }
     },
     {
       "source": "/api/(.*)",
-      "destination": "https://neurolearn-x.onrender.com/api/$1"
+      "destination": {
+        "service": "backend"
+      }
     },
     {
       "source": "/(.*)",

@@ -11,7 +11,7 @@ import {
 import { resetConnectionStateForTests } from "./connection";
 
 const healthPayload = {
-  status: "ok",
+  status: "ready",
   service: "NeuroLearn-X API",
 };
 
@@ -65,7 +65,7 @@ describe("API client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("retries Render's temporary 200 HTML loading page", async () => {
+  it("retries a temporary non-JSON readiness response", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
@@ -87,37 +87,21 @@ describe("API client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("waits for the API and safely retries a login that receives the wake page", async () => {
-    const loginPayload = { user: { role: "student" } };
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        new Response("<html><title>Render - Application loading</title></html>", {
-          status: 200,
-          headers: { "Content-Type": "text/html" },
-        }),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify(healthPayload), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify(loginPayload), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
+  it("never replays a write request that receives a non-API response", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<html>unexpected gateway page</html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
 
     await expect(
-      api("/api/auth/login", {
+      api("/api/auth/register/student", {
         method: "POST",
-        body: JSON.stringify({ participant_code: "STUDENT", password: "Secure!123" }),
+        body: JSON.stringify({ participant_code: "NEW-STUDENT" }),
       }),
-    ).resolves.toEqual(loginPayload);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(currentConnectionState().kind).toBe("online");
+    ).rejects.toMatchObject({ connectionKind: "configuration-error" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("distinguishes a stopped same-origin backend from an offline device", async () => {

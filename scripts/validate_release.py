@@ -169,7 +169,7 @@ def validate_source_archive(source_archive: Path) -> None:
         f"{prefix}.env.example",
         f"{prefix}.dockerignore",
         f"{prefix}Dockerfile",
-        f"{prefix}render.yaml",
+        f"{prefix}vercel.json",
         f"{prefix}.replit",
         f"{prefix}README.md",
         f"{prefix}Start-NeuroLearn-X.bat",

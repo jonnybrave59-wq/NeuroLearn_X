@@ -38,9 +38,6 @@ def main() -> int:
     database_url = os.getenv("DATABASE_URL", "")
     secret_key = os.getenv("SECRET_KEY", "")
     public_app_url = os.getenv("PUBLIC_APP_URL", "").strip()
-    render_hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
-    if not public_app_url and render_hostname:
-        public_app_url = f"https://{render_hostname}"
     public_origin = origin(public_app_url)
     configured_allowed_values = [
         item.strip().rstrip("/")

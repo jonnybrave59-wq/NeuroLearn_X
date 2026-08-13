@@ -1,126 +1,82 @@
-# NeuroLearn-X Render deployment
+# NeuroLearn-X Vercel deployment
 
-NeuroLearn-X deploys as one Docker web service plus Render PostgreSQL. FastAPI
-serves the compiled React PWA directly from `/`; API routes remain under `/api`.
-There is no second frontend host, launcher page, iframe, or redirect layer.
+NeuroLearn-X runs as two services in the existing Vercel project:
 
-## Deploy the Blueprint
+- `frontend`: the compiled React PWA.
+- `backend`: the FastAPI application exported by `backend/vercel.py`.
 
-1. Push this repository to GitHub, GitLab, or Bitbucket.
-2. In Render, choose **New → Blueprint**, connect the repository, and select the
-   root `render.yaml`.
-3. Review the two resources before applying:
+Top-level rewrites send `/api` and `/api/*` directly to the backend service.
+All other paths go to the frontend. The browser therefore uses stable,
+same-origin `/api` routes without CORS, mixed-content, or sleeping-host
+dependencies.
 
-   - `neurolearn-x`: Docker web service in Singapore.
-   - `neurolearn-x-postgres`: PostgreSQL 18 in the same region.
+## Required production environment
 
-4. Apply the Blueprint and wait for `/api/health/ready` to pass.
-5. Open the assigned `https://<service>.onrender.com/` URL. The real homepage
-   must appear immediately.
+Configure these values in the existing Vercel project. Store credentials as
+sensitive variables and never expose them through `VITE_*` names.
 
-The Blueprint generates `SECRET_KEY`, injects PostgreSQL's private connection
-string, enables secure cookies, approves the exact Capacitor WebView origin,
-runs Alembic on every container start, and rotates only the published local
-demo passwords to provider-managed production secrets. It never puts database
-credentials or secrets in the frontend or APK.
-
-The bundled Blueprint deliberately uses a paid Starter web service and a paid
-Basic-256MB PostgreSQL 18 database with 5 GB storage. Render's free PostgreSQL
-databases expire and do not provide production backup guarantees, so the free
-tier is not appropriate for retained research records. Review and approve the
-current provider price before applying the Blueprint.
-
-## Runtime commands
-
-Render builds with the root `Dockerfile`. The image runs:
-
-```text
-python /app/scripts/validate_deployment.py
-python -m alembic upgrade head
-python -m app.production_accounts
-python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=*
-```
-
-The frontend production build intentionally leaves `VITE_API_BASE_URL` empty,
-so browser requests use same-origin `/api` and `/api/health`. Render supplies
-`RENDER_EXTERNAL_HOSTNAME`; the backend converts only that provider-controlled
-hostname to the canonical HTTPS public origin.
-
-## Environment variables
-
-The Blueprint configures all required values:
-
-| Variable | Production value/purpose |
+| Variable | Purpose |
 | --- | --- |
-| `APP_ENV` | `production` |
-| `DATABASE_URL` | Render PostgreSQL `connectionString` |
-| `SECRET_KEY` | Render-generated random secret |
-| `PRODUCTION_TEACHER_PASSWORD` | Provider-managed strong secret; never use the published local password |
-| `PRODUCTION_DEMO_STUDENT_PASSWORD` | Provider-managed strong secret shared only with authorized demo learners |
-| `COOKIE_SECURE` | `1` |
-| `COOKIE_SAMESITE` | `none`, required by the separately bundled Android origin |
-| `CAPACITOR_ORIGINS` | `https://localhost` (the Capacitor WebView origin, not a backend URL) |
-| `CREATE_TABLES_ON_STARTUP` | `0`; Alembic owns the schema |
-| `SEED_DEMO_IF_EMPTY` | `0`; the preserved migration dataset supplies all records |
-| `SEED_DEMO_ON_STARTUP` | `0`; prevents password/data resets |
-| `LOG_LEVEL` | `INFO` |
-| `AI_MODEL` / `AI_API_KEY` | Provider-managed Question Studio model and credential; never embedded in the client |
+| `APP_ENV=production` | Enables production safeguards |
+| `DATABASE_URL` | Existing PostgreSQL pooler connection |
+| `SECRET_KEY` | Existing signing key, preserved so sessions remain valid |
+| `PUBLIC_APP_URL` | `https://neurolearn-x-staging.vercel.app` |
+| `FRONTEND_ORIGIN` | Same public origin |
+| `ALLOWED_ORIGINS` | Same public origin |
+| `COOKIE_SECURE=1` | HTTPS-only session cookie |
+| `COOKIE_SAMESITE=none` | Supports the separately packaged native client |
+| `CAPACITOR_ORIGINS=https://localhost` | Capacitor WebView origin, not an API URL |
+| `CREATE_TABLES_ON_STARTUP=0` | Alembic owns the production schema |
+| `SEED_DEMO_IF_EMPTY=0` | Prevents production data replacement |
+| `SEED_DEMO_ON_STARTUP=0` | Prevents production data replacement |
+| `DB_POOL_SIZE=1` | Serverless-safe PostgreSQL pool size |
+| `DB_MAX_OVERFLOW=1` | Limits per-instance connections |
+| `SUPABASE_URL` | Existing file-storage project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Backend-only storage credential |
+| `SUPABASE_STORAGE_BUCKET` | Existing learning-materials bucket |
 
-For a web-only deployment, `COOKIE_SAMESITE=lax` and an empty
-`CAPACITOR_ORIGINS` are sufficient. Add only exact HTTPS origins to
-`ALLOWED_ORIGINS`; never use `*` with credentialed requests.
+The frontend production build intentionally leaves `VITE_API_BASE_URL` empty.
+Browser requests therefore use `/api`; no provider hostname is compiled into
+the PWA.
 
-## Preserve the existing SQLite records
+## Database migration
 
-Before migration, back up both databases. Apply the newest schema to the local
-SQLite database:
-
-```powershell
-cd backend
-..\.venv\Scripts\python.exe -m alembic upgrade head
-cd ..
-```
-
-Set `DATABASE_URL` to Render PostgreSQL's external URL in the current shell,
-then run the guarded copier. The URL is read from the environment and is never
-accepted as a command-line argument:
+Run migrations deliberately before deploying code that requires a new schema:
 
 ```powershell
 Push-Location backend
-$env:DATABASE_URL = "postgresql://<render-user>:<password>@<external-host>/<database>"
 ..\.venv\Scripts\python.exe -m alembic upgrade head
 Pop-Location
-.\.venv\Scripts\python.exe scripts/migrate_sqlite_to_postgres.py --source backend/neurolearnx.db
 ```
 
-The copier refuses to write into a non-empty target. For the initial migration,
-use a new empty database so `--replace` is unnecessary. It copies relationships,
-authentication records, assessments, pathways, analytics, and embedded trained
-model artifacts, then aligns PostgreSQL sequences. Keep the transaction-safe
-SQLite checkpoint until the public count and relationship checks pass.
+`GET /api/ready` verifies PostgreSQL connectivity and confirms that the
+database is at revision `0010_gap_diagnoses`. It returns HTTP 503 when either
+condition fails. `GET /api/health` is the database-independent liveness check.
 
-## Verification
+## Deployment
 
-Verify these public endpoints and flows:
+The project is already linked through `.vercel/project.json`.
 
-- `/api/health`: identity and version.
-- `/api/health/live`: process liveness.
-- `/api/health/ready`: PostgreSQL query readiness.
-- `/`: direct real application homepage.
-- Student: `STEM001` / the `PRODUCTION_DEMO_STUDENT_PASSWORD` secret.
-- Teacher: `TEACHER01` / the `PRODUCTION_TEACHER_PASSWORD` secret.
+```powershell
+npx vercel
+npx vercel --prod
+```
 
-Log in as both roles, create or update a record, redeploy the service, and
-confirm the record persists. Then test registration, assessment submission,
-mental-effort rating, pathway regeneration, teacher inspection, Question
-Studio upload/generation, exports, refresh/deep links, and installation from a
-second device. The health response must be `no-store`, and compiled production
-assets must contain no loopback or private-network backend URL.
+Push the tested commit to the connected GitHub `main` branch so later releases
+remain reproducible. Inspect Vercel build and function logs after deployment.
 
-## Update a deployment
+## Required verification
 
-Push the tested commit to the connected branch. Render rebuilds the Docker
-image, runs deployment validation and Alembic migrations, and replaces the
-service only after its health check succeeds. Do not delete or recreate the
-PostgreSQL resource during ordinary updates. Back up research data before every
-schema or bulk-data change.
+1. Confirm `/api/health` returns HTTP 200 and version `1.3.6`.
+2. Confirm `/api/ready` returns HTTP 200, `database: postgresql`, and the
+   expected schema revision.
+3. Register a student and verify the new record persists.
+4. Verify student and teacher login, dashboard access, and refresh persistence.
+5. Confirm `sw.js` uses the current versioned cache and network-only API rules.
+6. Confirm the compiled production assets contain no external or development
+   API origin.
+7. Repeat the checks after at least 30 minutes with no application requests.
+
+Do not automatically replay login, registration, assessment submissions, or
+other write requests. Only the read-only readiness probe may retry during a
+genuine serverless/database startup.

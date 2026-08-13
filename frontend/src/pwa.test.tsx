@@ -99,7 +99,7 @@ describe("PWA controls", () => {
       .mockRejectedValueOnce(new TypeError("Failed to fetch"))
       .mockResolvedValueOnce(
         new Response(
-          JSON.stringify({ status: "ok", service: "NeuroLearn-X API" }),
+          JSON.stringify({ status: "ready", service: "NeuroLearn-X API" }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
       );
@@ -122,7 +122,7 @@ describe("PWA controls", () => {
   it("shows a cold-start message without calling it an internet failure", () => {
     setConnectionState("server-starting");
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ status: "ok", service: "NeuroLearn-X API" }), {
+      new Response(JSON.stringify({ status: "ready", service: "NeuroLearn-X API" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
@@ -136,7 +136,7 @@ describe("PWA controls", () => {
     setConnectionState("session-expired");
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
-        JSON.stringify({ status: "ok", service: "NeuroLearn-X API" }),
+        JSON.stringify({ status: "ready", service: "NeuroLearn-X API" }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       ),
     );

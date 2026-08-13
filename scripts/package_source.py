@@ -148,7 +148,7 @@ def validate(paths: list[Path]):
         ".env.example",
         ".dockerignore",
         "Dockerfile",
-        "render.yaml",
+        "vercel.json",
         ".replit",
         "README.md",
         "Start-NeuroLearn-X.bat",

@@ -22,6 +22,18 @@ def test_public_health_alias_and_security_headers(client):
     assert len(response.headers["x-request-id"]) >= 8
 
 
+def test_readiness_alias_checks_database_without_caching(client):
+    response = client.get("/api/ready")
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "service": "NeuroLearn-X API",
+        "database": "sqlite",
+        "schema_revision": None,
+    }
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+
+
 def test_request_id_is_correlated_and_private_api_is_not_cached(student_client):
     response = student_client.get(
         "/api/student/dashboard",
@@ -142,26 +154,8 @@ def test_same_origin_production_accepts_lax_cookie_policy():
     assert result.returncode == 0, result.stderr
 
 
-def test_render_hostname_supplies_the_canonical_same_origin():
-    result = run_validator(
-        {
-            "APP_ENV": "production",
-            "DATABASE_URL": "postgresql://user:pass@db.example/neurolearnx",
-            "SECRET_KEY": "x" * 64,
-            "COOKIE_SECURE": "1",
-            "COOKIE_SAMESITE": "none",
-            "PUBLIC_APP_URL": "",
-            "RENDER_EXTERNAL_HOSTNAME": "neurolearn-x.onrender.com",
-            "ALLOWED_ORIGINS": "",
-            "CAPACITOR_ORIGINS": "https://localhost",
-            "CREATE_TABLES_ON_STARTUP": "0",
-        }
-    )
-    assert result.returncode == 0, result.stderr
-
-
 def test_production_validator_rejects_startup_seeding_and_partial_ai_configuration():
-    public_url = "https://neurolearnx-test.onrender.com"
+    public_url = "https://neurolearnx-test.vercel.app"
     result = run_validator(
         {
             "APP_ENV": "production",

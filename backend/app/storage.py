@@ -2,7 +2,7 @@
 
 Supabase Storage is optional in local development. Production deployments that
 set one storage variable must set the complete group so raw uploads never fall
-back to an ephemeral Render filesystem.
+back to an ephemeral serverless filesystem.
 """
 
 from __future__ import annotations

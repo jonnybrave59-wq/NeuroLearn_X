@@ -1,4 +1,4 @@
-"""Copy a migrated NeuroLearn-X SQLite database into Render PostgreSQL.
+"""Copy a migrated NeuroLearn-X SQLite database into production PostgreSQL.
 
 The destination URL is read only from DATABASE_URL so credentials do not need
 to appear in command history. Run Alembic against both databases first.

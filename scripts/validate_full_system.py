@@ -24,7 +24,7 @@ REQUIRED = {
     ".env.production.example",
     "Dockerfile",
     "docker-entrypoint.sh",
-    "render.yaml",
+    "vercel.json",
     "backend/app/main.py",
     "backend/app/seed_if_empty.py",
     "backend/app/models.py",

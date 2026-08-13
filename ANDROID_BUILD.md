@@ -6,18 +6,18 @@ backups, requests Internet access, supports the hardware back button, and opens
 external links through the system browser.
 
 The APK bundles the compiled frontend. At build time,
-`VITE_API_BASE_URL` must be the deployed Render HTTPS origin. It must never be
+`VITE_API_BASE_URL` must be the deployed NeuroLearn-X HTTPS origin. It must never be
 localhost, a LAN address, or HTTP. The web app still uses relative `/api` when
 opened in a browser; only the separately bundled native client receives the
 explicit cloud origin.
 
 ## GitHub Actions debug APK
 
-1. Deploy Render and confirm `https://<service>.onrender.com/api/health/ready`.
+1. Confirm `https://neurolearn-x-staging.vercel.app/api/ready`.
 2. Push the source to GitHub.
 3. In **Settings → Secrets and variables → Actions → Variables**, set:
 
-   `NEUROLEARNX_PUBLIC_URL=https://<service>.onrender.com`
+   `NEUROLEARNX_PUBLIC_URL=https://neurolearn-x-staging.vercel.app`
 
 4. Run **Actions → Build NeuroLearn-X Android APK → Run workflow**.
 5. Download the `NeuroLearn-X-Android-debug` artifact.
@@ -49,8 +49,8 @@ the first Gradle dependency download.
 
 ```powershell
 cd frontend
-$env:VITE_PUBLIC_APP_URL = "https://<service>.onrender.com"
-$env:VITE_API_BASE_URL = "https://<service>.onrender.com"
+$env:VITE_PUBLIC_APP_URL = "https://neurolearn-x-staging.vercel.app"
+$env:VITE_API_BASE_URL = "https://neurolearn-x-staging.vercel.app"
 $env:VITE_APK_AVAILABLE = "false"
 npm ci
 npm test
@@ -73,7 +73,7 @@ Android's `apksigner verify` succeeds.
 
 ## Backend settings required by the APK
 
-The default `render.yaml` already sets:
+The existing Vercel project sets:
 
 ```text
 COOKIE_SECURE=1
@@ -83,5 +83,5 @@ CAPACITOR_ORIGINS=https://localhost
 
 `https://localhost` is Capacitor's protected WebView origin; it is not an API
 address. The native bundle sends credentialed requests only to the configured
-Render HTTPS origin. The backend returns exact credentialed CORS headers for
+Vercel HTTPS origin. The backend returns exact credentialed CORS headers for
 that one origin and keeps the session cookie HTTP-only and secure.

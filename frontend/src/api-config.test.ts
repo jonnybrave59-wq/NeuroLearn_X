@@ -7,7 +7,7 @@ describe("API configuration", () => {
       resolveApiConfiguration(undefined, "https://learn.example.edu/#/student"),
     ).toEqual({
       baseUrl: "",
-      healthUrl: "/api/health",
+      healthUrl: "/api/ready",
       crossOrigin: false,
       error: null,
     });
@@ -21,7 +21,7 @@ describe("API configuration", () => {
       ),
     ).toMatchObject({
       baseUrl: "https://api.example.edu",
-      healthUrl: "https://api.example.edu/api/health",
+      healthUrl: "https://api.example.edu/api/ready",
       crossOrigin: true,
       error: null,
     });

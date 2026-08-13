@@ -52,7 +52,7 @@ def package_files() -> dict[str, bytes]:
     files["scripts/smoke_test_deployment.py"] = (
         ROOT / "scripts" / "smoke_test_deployment.py"
     ).read_bytes()
-    files["render.yaml"] = (ROOT / "render.yaml").read_bytes()
+    files["vercel.json"] = (ROOT / "vercel.json").read_bytes()
     files["LICENSE.txt"] = (ROOT / "launcher" / "templates" / "LICENSE.txt").read_bytes()
 
     for source in sorted(path for path in (ROOT / "full-system").rglob("*") if path.is_file()):
@@ -101,7 +101,7 @@ def validate_inputs(files: dict[str, bytes]) -> None:
         "scripts/validate_deployment.py",
         "scripts/migrate_sqlite_to_postgres.py",
         "scripts/smoke_test_deployment.py",
-        "render.yaml",
+        "vercel.json",
     }
     missing = sorted(required.difference(files))
     if missing:

@@ -28,7 +28,7 @@ export function resolveApiConfiguration(
   if (!raw) {
     return {
       baseUrl: "",
-      healthUrl: "/api/health",
+      healthUrl: "/api/ready",
       crossOrigin: false,
       error: null,
     };
@@ -40,7 +40,7 @@ export function resolveApiConfiguration(
   } catch {
     return {
       baseUrl: "",
-      healthUrl: "/api/health",
+      healthUrl: "/api/ready",
       crossOrigin: false,
       error: "VITE_API_BASE_URL must be an absolute HTTP(S) origin.",
     };
@@ -49,7 +49,7 @@ export function resolveApiConfiguration(
   if (!/^https?:$/.test(backendUrl.protocol)) {
     return {
       baseUrl: "",
-      healthUrl: "/api/health",
+      healthUrl: "/api/ready",
       crossOrigin: false,
       error: "VITE_API_BASE_URL must use HTTP or HTTPS.",
     };
@@ -64,7 +64,7 @@ export function resolveApiConfiguration(
   ) {
     return {
       baseUrl: "",
-      healthUrl: "/api/health",
+      healthUrl: "/api/ready",
       crossOrigin: false,
       error: "VITE_API_BASE_URL must contain only the backend origin.",
     };
@@ -73,7 +73,7 @@ export function resolveApiConfiguration(
   if (isLoopback(backendUrl.hostname) && !isLoopback(frontendUrl.hostname)) {
     return {
       baseUrl: "",
-      healthUrl: "/api/health",
+      healthUrl: "/api/ready",
       crossOrigin: true,
       error: "A deployed application cannot use a loopback API address.",
     };
@@ -82,7 +82,7 @@ export function resolveApiConfiguration(
   if (frontendUrl.protocol === "https:" && backendUrl.protocol !== "https:") {
     return {
       baseUrl: "",
-      healthUrl: "/api/health",
+      healthUrl: "/api/ready",
       crossOrigin: true,
       error: "An HTTPS application cannot connect to an HTTP API.",
     };
@@ -91,7 +91,7 @@ export function resolveApiConfiguration(
   const baseUrl = backendUrl.origin;
   return {
     baseUrl,
-    healthUrl: `${baseUrl}/api/health`,
+    healthUrl: `${baseUrl}/api/ready`,
     crossOrigin: baseUrl !== frontendUrl.origin,
     error: null,
   };

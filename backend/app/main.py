@@ -151,10 +151,7 @@ from .tutoring import (
 
 
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
 PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "").strip()
-if not PUBLIC_APP_URL and RENDER_EXTERNAL_HOSTNAME:
-    PUBLIC_APP_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}"
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "0") == "1"
 COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").strip().lower()
 if COOKIE_SAMESITE not in {"lax", "strict", "none"}:
@@ -241,7 +238,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="NeuroLearn-X API",
-    version="1.3.5",
+    version="1.3.6",
     description="Explainable adaptive learning research prototype.",
     lifespan=lifespan,
 )
@@ -2268,7 +2265,7 @@ def health(response: Response):
         "status": "ok",
         "service": "NeuroLearn-X API",
         "name": "NeuroLearn-X",
-        "version": "1.3.5",
+        "version": "1.3.6",
         "mode": "research prototype",
     }
 
@@ -2282,15 +2279,29 @@ def liveness(response: Response):
 
 @app.get("/health/ready", include_in_schema=False)
 @app.get("/api/health/ready")
+@app.get("/ready", include_in_schema=False)
+@app.get("/api/ready")
 def readiness(response: Response, db: Session = Depends(get_db)):
     disable_health_caching(response)
     try:
         db.execute(text("SELECT 1"))
+        schema_revision = None
+        if PRODUCTION:
+            schema_revision = db.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            if schema_revision != "0010_gap_diagnoses":
+                raise RuntimeError("Production schema is not at the required revision")
     except Exception as error:
         raise HTTPException(
             status_code=503, detail="Database readiness check failed"
         ) from error
-    return {"status": "ready", "database": engine.dialect.name}
+    return {
+        "status": "ready",
+        "service": "NeuroLearn-X API",
+        "database": engine.dialect.name,
+        "schema_revision": schema_revision,
+    }
 
 
 @app.get("/release/{filename}")
