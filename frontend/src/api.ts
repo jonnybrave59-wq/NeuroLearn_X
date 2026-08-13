@@ -24,6 +24,38 @@ let healthProbeInFlight: Promise<ConnectionState> | null = null;
 let lastHealthProbeAt = 0;
 const HEALTH_RESULT_TTL_MS = 5_000;
 
+type ApiDiagnostic = {
+  phase: "configuration" | "health-check" | "api-request";
+  url: string;
+  method: string;
+  durationMs?: number;
+  attempt?: number;
+  status?: number;
+  statusText?: string;
+  reason?: string;
+  errorName?: string;
+  errorMessage?: string;
+};
+
+function safeErrorDetails(error: unknown) {
+  if (error instanceof Error) {
+    return { errorName: error.name, errorMessage: error.message };
+  }
+  return { errorName: typeof error, errorMessage: String(error) };
+}
+
+/**
+ * Keep production failures diagnosable without ever logging request bodies,
+ * cookies, authorization headers, learner records, or other private data.
+ */
+function logApiFailure(diagnostic: ApiDiagnostic) {
+  console.error("[NeuroLearn-X API] Request failed", {
+    ...diagnostic,
+    browserOnline: browserReportsOnline(),
+    apiOrigin: API_BASE || "same-origin",
+  });
+}
+
 function browserReportsOnline() {
   return typeof navigator === "undefined" || navigator.onLine !== false;
 }
@@ -110,6 +142,12 @@ export async function diagnoseConnection(
   } = {},
 ) {
   if (API_CONFIGURATION.error) {
+    logApiFailure({
+      phase: "configuration",
+      url: API_CONFIGURATION.healthUrl,
+      method: "GET",
+      reason: API_CONFIGURATION.error,
+    });
     return setConnectionState("configuration-error");
   }
 
@@ -138,6 +176,7 @@ export async function diagnoseConnection(
 
         const controller = new AbortController();
         const timeout = globalThis.setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+        const startedAt = Date.now();
         try {
           const response = await fetch(API_CONFIGURATION.healthUrl, {
             method: "GET",
@@ -148,13 +187,43 @@ export async function diagnoseConnection(
           });
 
           if (response.status === 401 || response.status === 403) {
+            logApiFailure({
+              phase: "health-check",
+              url: API_CONFIGURATION.healthUrl,
+              method: "GET",
+              attempt: attempt + 1,
+              durationMs: Date.now() - startedAt,
+              status: response.status,
+              statusText: response.statusText,
+              reason: "Health endpoint unexpectedly requires authentication",
+            });
             await clearOfflineSession();
             return setConnectionState("session-expired");
           }
           if (response.status === 404) {
+            logApiFailure({
+              phase: "health-check",
+              url: API_CONFIGURATION.healthUrl,
+              method: "GET",
+              attempt: attempt + 1,
+              durationMs: Date.now() - startedAt,
+              status: response.status,
+              statusText: response.statusText,
+              reason: "Health endpoint was not found",
+            });
             return setConnectionState("configuration-error");
           }
           if (!response.ok) {
+            logApiFailure({
+              phase: "health-check",
+              url: API_CONFIGURATION.healthUrl,
+              method: "GET",
+              attempt: attempt + 1,
+              durationMs: Date.now() - startedAt,
+              status: response.status,
+              statusText: response.statusText,
+              reason: "Backend readiness check returned an error",
+            });
             if (response.status >= 500 && attempt < retryDelays.length - 1) {
               setConnectionState("server-starting");
               continue;
@@ -165,7 +234,18 @@ export async function diagnoseConnection(
           let payload: { status?: string; service?: string };
           try {
             payload = (await response.json()) as { status?: string; service?: string };
-          } catch {
+          } catch (error) {
+            logApiFailure({
+              phase: "health-check",
+              url: API_CONFIGURATION.healthUrl,
+              method: "GET",
+              attempt: attempt + 1,
+              durationMs: Date.now() - startedAt,
+              status: response.status,
+              statusText: response.statusText,
+              reason: "Health endpoint did not return JSON",
+              ...safeErrorDetails(error),
+            });
             if (attempt < retryDelays.length - 1) {
               setConnectionState("server-starting");
               continue;
@@ -173,6 +253,16 @@ export async function diagnoseConnection(
             return setConnectionState("configuration-error");
           }
           if (payload.status !== "ready" || payload.service !== "NeuroLearn-X API") {
+            logApiFailure({
+              phase: "health-check",
+              url: API_CONFIGURATION.healthUrl,
+              method: "GET",
+              attempt: attempt + 1,
+              durationMs: Date.now() - startedAt,
+              status: response.status,
+              statusText: response.statusText,
+              reason: "Health endpoint returned an unexpected service identity or state",
+            });
             if (attempt < retryDelays.length - 1) {
               setConnectionState("server-starting");
               continue;
@@ -180,7 +270,16 @@ export async function diagnoseConnection(
             return setConnectionState("configuration-error");
           }
           return setConnectionState("online");
-        } catch {
+        } catch (error) {
+          logApiFailure({
+            phase: "health-check",
+            url: API_CONFIGURATION.healthUrl,
+            method: "GET",
+            attempt: attempt + 1,
+            durationMs: Date.now() - startedAt,
+            reason: "Health request could not be completed",
+            ...safeErrorDetails(error),
+          });
           const failureKind = await failedFetchKind();
           if (
             failureKind === "server-unavailable" &&
@@ -252,15 +351,26 @@ export async function api<T = any>(
     : null;
 
   let response: Response;
+  const requestUrl = apiUrl(path);
+  const requestMethod = requestOptions.method || "GET";
+  const startedAt = Date.now();
   try {
-    response = await fetch(apiUrl(path), {
+    response = await fetch(requestUrl, {
       ...requestOptions,
       headers,
       credentials: "include",
       cache: requestOptions.method && requestOptions.method !== "GET" ? "no-store" : "no-cache",
       signal: requestOptions.signal || timeoutController?.signal,
     });
-  } catch {
+  } catch (error) {
+    logApiFailure({
+      phase: "api-request",
+      url: requestUrl,
+      method: requestMethod,
+      durationMs: Date.now() - startedAt,
+      reason: "API request could not be completed",
+      ...safeErrorDetails(error),
+    });
     const state = await reportNetworkFailure();
     throw connectionApiError(state);
   } finally {
@@ -273,6 +383,15 @@ export async function api<T = any>(
     response.status !== 204 &&
     !contentType.toLowerCase().includes("application/json")
   ) {
+    logApiFailure({
+      phase: "api-request",
+      url: requestUrl,
+      method: requestMethod,
+      durationMs: Date.now() - startedAt,
+      status: response.status,
+      statusText: response.statusText,
+      reason: "API returned a non-JSON response",
+    });
     const state = setConnectionState("configuration-error");
     throw connectionApiError(state);
   }
@@ -294,6 +413,15 @@ export async function api<T = any>(
     } catch {
       // The generic message remains useful for non-JSON failures.
     }
+    logApiFailure({
+      phase: "api-request",
+      url: requestUrl,
+      method: requestMethod,
+      durationMs: Date.now() - startedAt,
+      status: response.status,
+      statusText: response.statusText,
+      reason: "API returned an error response",
+    });
     const isExpired = connectionState.kind === "session-expired";
     throw new ApiError(
       isExpired ? connectionState.message : detail,

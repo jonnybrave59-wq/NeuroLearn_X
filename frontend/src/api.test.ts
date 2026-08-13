@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   api,
@@ -16,6 +16,10 @@ const healthPayload = {
 };
 
 describe("API client", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+
   afterEach(() => {
     resetConnectionStateForTests();
     resetApiDiagnosticsForTests();
@@ -110,6 +114,36 @@ describe("API client", () => {
       connectionKind: "server-unavailable",
     });
     expect(currentConnectionState().kind).toBe("server-unavailable");
+    expect(console.error).toHaveBeenCalledWith(
+      "[NeuroLearn-X API] Request failed",
+      expect.objectContaining({
+        phase: "api-request",
+        url: "/api/student/dashboard",
+        errorName: "TypeError",
+        errorMessage: "Failed to fetch",
+      }),
+    );
+  });
+
+  it("logs a failed readiness response with status and URL but no request data", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Unavailable" }), { status: 503 }),
+    );
+
+    await expect(
+      diagnoseConnection({ retryDelaysMs: [0] }),
+    ).resolves.toMatchObject({ kind: "server-unavailable" });
+    expect(console.error).toHaveBeenCalledWith(
+      "[NeuroLearn-X API] Request failed",
+      expect.objectContaining({
+        phase: "health-check",
+        url: "/api/ready",
+        status: 503,
+      }),
+    );
+    const diagnostic = vi.mocked(console.error).mock.calls[0]?.[1];
+    expect(diagnostic).not.toHaveProperty("headers");
+    expect(diagnostic).not.toHaveProperty("body");
   });
 
   it("reports offline only when the browser is offline and requests fail", async () => {

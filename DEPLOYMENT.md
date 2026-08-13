@@ -67,7 +67,7 @@ remain reproducible. Inspect Vercel build and function logs after deployment.
 
 ## Required verification
 
-1. Confirm `/api/health` returns HTTP 200 and version `1.3.6`.
+1. Confirm `/api/health` returns HTTP 200 and version `1.3.7`.
 2. Confirm `/api/ready` returns HTTP 200, `database: postgresql`, and the
    expected schema revision.
 3. Register a student and verify the new record persists.
